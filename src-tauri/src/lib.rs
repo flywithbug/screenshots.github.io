@@ -36,6 +36,12 @@ pub fn run() {
             let new_project = MenuItemBuilder::with_id("new-project", "New Project")
                 .accelerator("CmdOrCtrl+N")
                 .build(handle)?;
+            let import_project = MenuItemBuilder::with_id("import-project", "Import Project...")
+                .accelerator("CmdOrCtrl+Shift+O")
+                .build(handle)?;
+            let export_project = MenuItemBuilder::with_id("export-project", "Export Project...")
+                .accelerator("CmdOrCtrl+Shift+S")
+                .build(handle)?;
             let import_screenshots =
                 MenuItemBuilder::with_id("import-screenshots", "Import Screenshots...")
                     .accelerator("CmdOrCtrl+O")
@@ -49,6 +55,9 @@ pub fn run() {
 
             let file_menu = SubmenuBuilder::new(handle, "File")
                 .item(&new_project)
+                .separator()
+                .item(&import_project)
+                .item(&export_project)
                 .separator()
                 .item(&import_screenshots)
                 .separator()

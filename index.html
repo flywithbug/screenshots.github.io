@@ -35,6 +35,12 @@
                         case 'new-project':
                             createProject();
                             break;
+                        case 'import-project':
+                            importProject();
+                            break;
+                        case 'export-project':
+                            exportProject();
+                            break;
                         case 'import-screenshots':
                             importScreenshotsFromTauri();
                             break;
@@ -55,7 +61,14 @@
                     const link = e.target.closest('a[target="_blank"]');
                     if (link) {
                         e.preventDefault();
-                        window.__TAURI__.opener.openUrl(link.href);
+                        e.stopPropagation();
+                        const rawHref = link.getAttribute('href') || '';
+                        const resolvedHref = link.href || rawHref;
+                        if (!/^https?:\/\//i.test(resolvedHref)) {
+                            console.warn('Blocked non-http external link in Tauri:', resolvedHref);
+                            return;
+                        }
+                        window.__TAURI__.opener.openUrl(resolvedHref);
                     }
                 });
             });
@@ -135,6 +148,20 @@
                         </div>
                     </div>
                     <div class="project-buttons">
+                        <button class="project-btn" id="export-project-btn" title="Export Project">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 3v12"/>
+                                <path d="m7 10 5 5 5-5"/>
+                                <path d="M5 21h14"/>
+                            </svg>
+                        </button>
+                        <button class="project-btn" id="import-project-btn" title="Import Project">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 21V9"/>
+                                <path d="m7 14 5-5 5 5"/>
+                                <path d="M5 3h14"/>
+                            </svg>
+                        </button>
                         <button class="project-btn" id="new-project-btn" title="New Project">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M12 5v14M5 12h14"/>
@@ -159,6 +186,7 @@
                 <h2>Screenshots</h2>
 
                 <input type="file" id="file-input" multiple accept="image/*" hidden>
+                <input type="file" id="project-import-input" accept=".json,application/json" hidden>
                 <div class="screenshot-list" id="screenshot-list">
                     <!-- Screenshots will be added here dynamically -->
                 </div>
@@ -196,10 +224,6 @@
                                 <div class="device-option selected" data-device="iphone-6.9">
                                     <span class="device-option-name">iPhone 6.9"</span>
                                     <span class="device-option-size">1320 × 2868</span>
-                                </div>
-                                <div class="device-option" data-device="iphone-6.7">
-                                    <span class="device-option-name">iPhone 6.7"</span>
-                                    <span class="device-option-size">1290 × 2796</span>
                                 </div>
                                 <div class="device-option" data-device="iphone-6.5">
                                     <span class="device-option-name">iPhone 6.5"</span>
@@ -793,7 +817,7 @@
                 <div id="headline-options">
                 <div class="control-group">
                     <div class="textarea-with-button">
-                        <textarea id="headline-text" rows="2" placeholder="Your feature headline"></textarea>
+                        <textarea id="headline-text" rows="2" placeholder="Your feature headline, e.g. [color=#ff4d4f size=120]Limited[/] [grad=#00d2ff,#3a7bd5]Offer[/]"></textarea>
                         <button class="magic-translate-btn" id="translate-headline-btn" title="Translate to all languages">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -914,7 +938,7 @@
                 <div id="subheadline-options" style="display: none;">
                 <div class="control-group">
                     <div class="textarea-with-button">
-                        <textarea id="subheadline-text" rows="2" placeholder="Optional subheadline"></textarea>
+                        <textarea id="subheadline-text" rows="2" placeholder="Optional subheadline, supports [color=#...], [size=...], [grad=#a,#b]"></textarea>
                         <button class="magic-translate-btn" id="translate-subheadline-btn" title="Translate to all languages">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -994,6 +1018,33 @@
                     </div>
                 </div>
                 </div><!-- end subheadline-options -->
+
+                <div class="divider"></div>
+
+                <div class="text-help-card">
+                    <h4>Rich Text 示例与用法</h4>
+                    <p class="text-help-desc">在文案中使用标记语法，支持局部颜色、字号、粗细、斜体、下划线、删除线和渐变。</p>
+                    <div class="text-help-section">
+                        <div class="text-help-title">多文本示例</div>
+                        <pre class="text-help-code">[color=#ffffff size=92 weight=700]Make Better Apps[/]
+[color=#a0aec0 size=56]Build faster with [/][color=#ff4d4f size=56 weight=700]AI[/]
+[grad=#00d2ff,#3a7bd5 size=72 weight=800]Ship Stunning Screenshots[/]
+[i color=#ffd166 size=52]Now available[/]
+[u color=#7ae582 size=48]Try it free today[/]</pre>
+                    </div>
+                    <div class="text-help-section">
+                        <div class="text-help-title">同一行多样式</div>
+                        <pre class="text-help-code">[color=#ffffff size=64]Save [/][color=#ff6b6b size=76 weight=800]40%[/][color=#ffffff size=64] this week[/]</pre>
+                    </div>
+                    <div class="text-help-section">
+                        <div class="text-help-title">常用规则</div>
+                        <ul class="text-help-list">
+                            <li><code>[/]</code> 结束当前样式块（支持嵌套）。</li>
+                            <li>支持参数：<code>color</code> <code>size</code> <code>weight</code> <code>font</code> <code>i</code> <code>u</code> <code>s</code> <code>grad</code>。</li>
+                            <li>渐变示例：<code>[grad=#00d2ff,#3a7bd5]Text[/]</code>。</li>
+                        </ul>
+                    </div>
+                </div>
             </div>
 
             <!-- Elements Tab -->
@@ -1200,7 +1251,7 @@
                         <div class="control-group">
                             <label class="control-label">Text</label>
                             <div class="textarea-with-button">
-                                <textarea id="element-text-input" rows="2" placeholder="Enter text"></textarea>
+                                <textarea id="element-text-input" rows="2" placeholder="Enter text, e.g. [color=#ff4d4f size=72]SALE[/] [grad=#00d2ff,#3a7bd5]NOW[/]"></textarea>
                                 <button class="magic-translate-btn" id="translate-element-btn" title="Translate to all languages">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -1798,9 +1849,32 @@
             </div>
 
             <div class="add-language-section">
-                <select id="add-language-select" class="control-select">
-                    <option value="">Add a language...</option>
-                </select>
+                <div class="add-language-mode-row">
+                    <label for="add-language-mode-select">Add Mode</label>
+                    <select id="add-language-mode-select" class="control-select">
+                        <option value="single">Single</option>
+                        <option value="multi">Multi-select</option>
+                        <option value="all">Select all</option>
+                    </select>
+                </div>
+
+                <div id="add-language-single-mode">
+                    <select id="add-language-select" class="control-select">
+                        <option value="">Add a language...</option>
+                    </select>
+                </div>
+
+                <div id="add-language-multi-mode" style="display: none;">
+                    <select id="add-language-multi-select" class="control-select" multiple size="8"></select>
+                    <div class="add-language-actions">
+                        <button class="modal-btn modal-btn-cancel" id="add-language-select-all-btn">Select All</button>
+                        <button class="modal-btn modal-btn-confirm" id="add-language-apply-btn" style="background: var(--accent);">Add Selected</button>
+                    </div>
+                </div>
+
+                <div id="add-language-all-mode" style="display: none;">
+                    <button class="modal-btn modal-btn-confirm" id="add-language-all-btn" style="background: var(--accent); width: 100%;">Add All Remaining Languages</button>
+                </div>
             </div>
 
             <div class="modal-buttons">
@@ -1950,6 +2024,9 @@
     <script src="magical-titles.js"></script>
     <script src="lucide-icons.js"></script>
     <script src="three-renderer.js"></script>
+    <script src="export-manager.js"></script>
+    <script src="text.js"></script>
+    <script src="text-controls.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

@@ -18,6 +18,8 @@
     --overlay-bg: rgba(0, 0, 0, 0.7);
     --accent-subtle: rgba(10, 132, 255, 0.1);
     --accent-subtle-strong: rgba(10, 132, 255, 0.15);
+    --sidebar-left-width: clamp(280px, 22vw, 380px);
+    --sidebar-right-width: clamp(300px, 24vw, 420px);
 }
 
 @media (prefers-color-scheme: light) {
@@ -129,7 +131,7 @@ html.tauri-app .right-sidebar {
 
 .app-container {
     display: grid;
-    grid-template-columns: 320px 1fr 340px;
+    grid-template-columns: var(--sidebar-left-width) minmax(0, 1fr) var(--sidebar-right-width);
     min-height: 100vh;
     max-height: 100vh;
 }
@@ -347,6 +349,18 @@ html.tauri-app .right-sidebar {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.screenshot-name-input {
+    width: 100%;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    outline: none;
 }
 
 .screenshot-device {
@@ -822,6 +836,64 @@ input[type="range"]::-webkit-slider-thumb {
     height: 16px;
 }
 
+/* Text tab helper */
+.text-help-card {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+}
+
+.text-help-card h4 {
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.text-help-desc {
+    margin: 0 0 10px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.text-help-section {
+    margin-top: 10px;
+}
+
+.text-help-title {
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.text-help-code {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.text-help-list {
+    margin: 0;
+    padding-left: 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.text-help-list code {
+    color: var(--text-primary);
+}
+
 /* Gradient editor */
 .gradient-stops {
     display: flex;
@@ -1105,6 +1177,13 @@ input[type="range"]::-webkit-slider-thumb {
 
 .output-size-menu .device-option.selected {
     background: var(--accent-subtle-strong);
+}
+
+.output-size-menu .device-option.primary-selected .device-option-name::after {
+    content: ' (Primary)';
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-weight: 400;
 }
 
 .output-size-menu .device-option-name {
@@ -2368,7 +2447,7 @@ input[type="range"]::-webkit-slider-thumb {
     position: absolute;
     top: calc(100% + 4px);
     left: 0;
-    width: calc(320px - 40px); /* Full sidebar width minus padding */
+    width: calc(var(--sidebar-left-width) - 40px);
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 10px;
@@ -2789,6 +2868,32 @@ input[type="range"]::-webkit-slider-thumb {
 
 .add-language-section {
     margin-bottom: 16px;
+}
+
+.add-language-mode-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.add-language-mode-row label {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+#add-language-multi-select {
+    min-height: 180px;
+}
+
+.add-language-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.add-language-actions .modal-btn {
+    flex: 1;
 }
 
 /* Screenshot language flags indicator */

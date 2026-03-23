@@ -4,6 +4,7 @@ const state = {
     selectedIndex: 0,
     transferTarget: null, // Index of screenshot waiting to receive style transfer
     outputDevice: 'iphone-6.9',
+    exportDevices: ['iphone-6.9'],
     currentLanguage: 'en', // Global current language for all text
     projectLanguages: ['en'], // Languages available in this project
     customWidth: 1290,
@@ -21,6 +22,7 @@ const state = {
             },
             solid: '#1a1a2e',
             image: null,
+            imageSrc: null,
             imageFit: 'cover',
             imageBlur: 0,
             overlayColor: '#000000',
@@ -98,6 +100,42 @@ const state = {
 };
 
 const baseTextDefaults = JSON.parse(JSON.stringify(state.defaults.text));
+let textApi = null;
+
+function initTextApi() {
+    if (!window.TextModule?.createTextApi) return;
+    textApi = window.TextModule.createTextApi({
+        state,
+        baseTextDefaults,
+        getCurrentScreenshot,
+        setTextSetting,
+        updateFontPickerPreview,
+        formatValue,
+        ctx,
+        getCanvasDimensions
+    });
+}
+
+function normalizeExportDevices(devices) {
+    const validDevices = new Set(
+        Array.from(document.querySelectorAll('.output-size-menu .device-option')).map(opt => opt.dataset.device)
+    );
+    const list = Array.isArray(devices) ? devices : [];
+    const normalized = list.filter(device => validDevices.has(device));
+    return normalized.length > 0 ? normalized : [normalizeOutputDevice(state.outputDevice)];
+}
+
+function normalizeOutputDevice(device) {
+    const validDevices = new Set(
+        Array.from(document.querySelectorAll('.output-size-menu .device-option')).map(opt => opt.dataset.device)
+    );
+    const requested = device || 'iphone-6.9';
+    if (validDevices.has(requested)) return requested;
+    if (requested === 'iphone-6.7' && validDevices.has('iphone-6.9')) return 'iphone-6.9';
+    if (validDevices.has('iphone-6.9')) return 'iphone-6.9';
+    const first = validDevices.values().next().value;
+    return first || 'iphone-6.9';
+}
 
 // Runtime-only state (not persisted)
 let selectedElementId = null;
@@ -129,77 +167,23 @@ function getScreenshotSettings() {
 }
 
 function getText() {
-    const screenshot = getCurrentScreenshot();
-    if (screenshot) {
-        screenshot.text = normalizeTextSettings(screenshot.text);
-        return screenshot.text;
-    }
-    state.defaults.text = normalizeTextSettings(state.defaults.text);
-    return state.defaults.text;
+    return textApi.getText();
 }
 
 function getTextLayoutLanguage(text) {
-    if (text.currentLayoutLang) return text.currentLayoutLang;
-    if (text.headlineEnabled !== false) return text.currentHeadlineLang || 'en';
-    if (text.subheadlineEnabled) return text.currentSubheadlineLang || 'en';
-    return text.currentHeadlineLang || text.currentSubheadlineLang || 'en';
+    return textApi.getTextLayoutLanguage(text);
 }
 
 function getTextLanguageSettings(text, lang) {
-    if (!text.languageSettings) text.languageSettings = {};
-    if (!text.languageSettings[lang]) {
-        const sourceLang = text.currentLayoutLang || text.currentHeadlineLang || text.currentSubheadlineLang || 'en';
-        const sourceSettings = text.languageSettings[sourceLang];
-        text.languageSettings[lang] = {
-            headlineSize: sourceSettings ? sourceSettings.headlineSize : (text.headlineSize || 100),
-            subheadlineSize: sourceSettings ? sourceSettings.subheadlineSize : (text.subheadlineSize || 50),
-            position: sourceSettings ? sourceSettings.position : (text.position || 'top'),
-            offsetY: sourceSettings ? sourceSettings.offsetY : (typeof text.offsetY === 'number' ? text.offsetY : 12),
-            lineHeight: sourceSettings ? sourceSettings.lineHeight : (text.lineHeight || 110)
-        };
-    }
-    return text.languageSettings[lang];
+    return textApi.getTextLanguageSettings(text, lang);
 }
 
 function getEffectiveLayout(text, lang) {
-    if (!text.perLanguageLayout) {
-        return {
-            headlineSize: text.headlineSize || 100,
-            subheadlineSize: text.subheadlineSize || 50,
-            position: text.position || 'top',
-            offsetY: typeof text.offsetY === 'number' ? text.offsetY : 12,
-            lineHeight: text.lineHeight || 110
-        };
-    }
-    return getTextLanguageSettings(text, lang);
+    return textApi.getEffectiveLayout(text, lang);
 }
 
 function normalizeTextSettings(text) {
-    const merged = JSON.parse(JSON.stringify(baseTextDefaults));
-    if (text) {
-        Object.assign(merged, text);
-        if (text.languageSettings) {
-            merged.languageSettings = JSON.parse(JSON.stringify(text.languageSettings));
-        }
-    }
-
-    merged.headlines = merged.headlines || { en: '' };
-    merged.headlineLanguages = merged.headlineLanguages || ['en'];
-    merged.currentHeadlineLang = merged.currentHeadlineLang || merged.headlineLanguages[0] || 'en';
-    merged.currentLayoutLang = merged.currentLayoutLang || merged.currentHeadlineLang || 'en';
-
-    merged.subheadlines = merged.subheadlines || { en: '' };
-    merged.subheadlineLanguages = merged.subheadlineLanguages || ['en'];
-    merged.currentSubheadlineLang = merged.currentSubheadlineLang || merged.subheadlineLanguages[0] || 'en';
-
-    if (!merged.languageSettings) merged.languageSettings = {};
-    const languages = new Set([...merged.headlineLanguages, ...merged.subheadlineLanguages]);
-    if (languages.size === 0) languages.add('en');
-    languages.forEach((lang) => {
-        getTextLanguageSettings(merged, lang);
-    });
-
-    return merged;
+    return textApi.normalizeTextSettings(text);
 }
 
 function getElements() {
@@ -543,6 +527,11 @@ function formatValue(num) {
 function setBackground(key, value) {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
+        if (key === 'image') {
+            screenshot.background.image = value;
+            screenshot.background.imageSrc = value?.src || null;
+            return;
+        }
         if (key.includes('.')) {
             const parts = key.split('.');
             let obj = screenshot.background;
@@ -583,20 +572,37 @@ function setCurrentScreenshotAsDefault() {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
         state.defaults.background = JSON.parse(JSON.stringify(screenshot.background));
+        if (!state.defaults.background.imageSrc && screenshot.background?.image?.src) {
+            state.defaults.background.imageSrc = screenshot.background.image.src;
+        }
+        state.defaults.background.image = null;
         state.defaults.screenshot = JSON.parse(JSON.stringify(screenshot.screenshot));
         state.defaults.text = JSON.parse(JSON.stringify(screenshot.text));
     }
 }
 
-// Language flags mapping
-const languageFlags = {
-    'en': '🇺🇸', 'en-gb': '🇬🇧', 'de': '🇩🇪', 'fr': '🇫🇷', 'es': '🇪🇸',
-    'it': '🇮🇹', 'pt': '🇵🇹', 'pt-br': '🇧🇷', 'nl': '🇳🇱', 'ru': '🇷🇺',
-    'ja': '🇯🇵', 'ko': '🇰🇷', 'zh': '🇨🇳', 'zh-tw': '🇹🇼', 'ar': '🇸🇦',
-    'hi': '🇮🇳', 'tr': '🇹🇷', 'pl': '🇵🇱', 'sv': '🇸🇪', 'da': '🇩🇰',
-    'no': '🇳🇴', 'fi': '🇫🇮', 'th': '🇹🇭', 'vi': '🇻🇳', 'id': '🇮🇩',
-    'uk': '🇺🇦'
-};
+function hydrateBackground(background) {
+    if (!background || typeof background !== 'object') return background;
+
+    if (!background.imageSrc && background.image?.src) {
+        background.imageSrc = background.image.src;
+    }
+
+    background.image = null;
+
+    if (background.imageSrc) {
+        const img = new Image();
+        img.onload = () => {
+            background.image = img;
+            updateCanvas();
+        };
+        img.src = background.imageSrc;
+        background.image = img;
+    }
+
+    return background;
+}
+
 
 // Google Fonts configuration
 const googleFonts = {
@@ -1237,7 +1243,6 @@ function updateElementFontPickerPreview(el) {
 // Device dimensions
 const deviceDimensions = {
     'iphone-6.9': { width: 1320, height: 2868 },
-    'iphone-6.7': { width: 1290, height: 2796 },
     'iphone-6.5': { width: 1284, height: 2778 },
     'iphone-5.5': { width: 1242, height: 2208 },
     'ipad-12.9': { width: 2048, height: 2732 },
@@ -1315,6 +1320,7 @@ previewStrip.addEventListener('wheel', (e) => {
 }, { passive: false });
 let suppressSwitchModelUpdate = false;  // Flag to suppress updateCanvas from switchPhoneModel
 const fileInput = document.getElementById('file-input');
+const projectImportInput = document.getElementById('project-import-input');
 const screenshotList = document.getElementById('screenshot-list');
 const noScreenshot = document.getElementById('no-screenshot');
 
@@ -1324,9 +1330,38 @@ const DB_NAME = 'AppStoreScreenshotGenerator';
 const DB_VERSION = 2;
 const PROJECTS_STORE = 'projects';
 const META_STORE = 'meta';
+const STATE_BACKUP_KEY_PREFIX = 'appscreen_state_backup_v1_';
 
 let currentProjectId = 'default';
 let projects = [{ id: 'default', name: 'Default Project', screenshotCount: 0 }];
+
+function getStateBackupKey(projectId) {
+    return `${STATE_BACKUP_KEY_PREFIX}${projectId}`;
+}
+
+function writeStateBackup(projectId, stateToSave) {
+    try {
+        localStorage.setItem(getStateBackupKey(projectId), JSON.stringify({
+            savedAt: Date.now(),
+            data: stateToSave
+        }));
+    } catch (e) {
+        // localStorage may be full for very large projects; keep this best-effort.
+    }
+}
+
+function readStateBackup(projectId) {
+    try {
+        const raw = localStorage.getItem(getStateBackupKey(projectId));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        if (!parsed.data || typeof parsed.data !== 'object') return null;
+        return parsed.data;
+    } catch (e) {
+        return null;
+    }
+}
 
 function openDatabase() {
     return new Promise((resolve, reject) => {
@@ -1474,6 +1509,7 @@ async function init() {
 
 // Set up event listeners immediately (don't wait for async init)
 function initSync() {
+    initTextApi();
     setupEventListeners();
     setupElementEventListeners();
     setupPopoutEventListeners();
@@ -1485,10 +1521,18 @@ function initSync() {
     init();
 }
 
-// Save state to IndexedDB for current project
-function saveState() {
-    if (!db) return;
+// Best-effort flush on page lifecycle transitions (especially quick refresh).
+window.addEventListener('pagehide', () => {
+    saveState();
+});
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+        saveState();
+    }
+});
 
+// Save state to IndexedDB for current project
+function buildSerializableProjectState(projectId = currentProjectId) {
     // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
     const screenshotsToSave = state.screenshots.map(s => {
         // Save localized images (without Image objects, just src/name)
@@ -1508,9 +1552,14 @@ function saveState() {
         return {
             src: s.image?.src || '', // Legacy compatibility
             name: s.name,
+            exportName: s.exportName || '',
             deviceType: s.deviceType,
             localizedImages: localizedImages,
-            background: s.background,
+            background: {
+                ...s.background,
+                image: null,
+                imageSrc: s.background?.imageSrc || s.background?.image?.src || null
+            },
             screenshot: s.screenshot,
             text: s.text,
             elements: (s.elements || []).map(el => ({
@@ -1522,33 +1571,89 @@ function saveState() {
         };
     });
 
-    const stateToSave = {
-        id: currentProjectId,
+    return {
+        id: projectId,
         formatVersion: 2, // Version 2: new 3D positioning formula
         screenshots: screenshotsToSave,
         selectedIndex: state.selectedIndex,
         outputDevice: state.outputDevice,
+        exportDevices: state.exportDevices,
         customWidth: state.customWidth,
         customHeight: state.customHeight,
         currentLanguage: state.currentLanguage,
         projectLanguages: state.projectLanguages,
-        defaults: state.defaults
+        defaults: {
+            ...state.defaults,
+            background: {
+                ...state.defaults.background,
+                image: null,
+                imageSrc: state.defaults.background?.imageSrc || state.defaults.background?.image?.src || null
+            }
+        }
     };
+}
 
-    // Update screenshot count in project metadata
+let saveChain = Promise.resolve();
+let isHydratingProjectState = false;
+
+function isSnapshotConsistent(snapshot) {
+    if (!snapshot || !Array.isArray(snapshot.screenshots)) return false;
+    const count = snapshot.screenshots.length;
+    const index = typeof snapshot.selectedIndex === 'number' ? snapshot.selectedIndex : 0;
+    if (count === 0) {
+        return index === 0;
+    }
+    return index >= 0 && index < count;
+}
+
+function persistCurrentState(stateToSave) {
+    if (!db) return Promise.resolve();
+
+    // Keep project screenshot count in sync with current state.
     const project = projects.find(p => p.id === currentProjectId);
     if (project) {
-        project.screenshotCount = state.screenshots.length;
-        saveProjectsMeta();
+        project.screenshotCount = stateToSave.screenshots.length;
     }
 
-    try {
-        const transaction = db.transaction([PROJECTS_STORE], 'readwrite');
-        const store = transaction.objectStore(PROJECTS_STORE);
-        store.put(stateToSave);
-    } catch (e) {
-        console.error('Error saving state:', e);
+    return new Promise((resolve, reject) => {
+        try {
+            // Persist project data + metadata atomically to avoid refresh-time mismatch.
+            const transaction = db.transaction([PROJECTS_STORE, META_STORE], 'readwrite');
+            const projectStore = transaction.objectStore(PROJECTS_STORE);
+            const metaStore = transaction.objectStore(META_STORE);
+
+            projectStore.put(stateToSave);
+            metaStore.put({ key: 'projects', value: projects });
+            metaStore.put({ key: 'currentProject', value: currentProjectId });
+
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error || new Error('State transaction failed'));
+            transaction.onabort = () => reject(transaction.error || new Error('State transaction aborted'));
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+function saveState() {
+    const snapshot = buildSerializableProjectState(currentProjectId);
+    if (isHydratingProjectState || !isSnapshotConsistent(snapshot)) {
+        return saveChain;
     }
+
+    writeStateBackup(currentProjectId, snapshot);
+    if (!db) return Promise.resolve();
+
+    saveChain = saveChain
+        .catch(() => {
+            // Keep chain alive after prior failures.
+        })
+        .then(() => persistCurrentState(snapshot))
+        .catch((e) => {
+            console.error('Error saving state:', e);
+        });
+
+    return saveChain;
 }
 
 // Migrate 3D positions from old formula to new formula
@@ -1597,13 +1702,20 @@ function loadState() {
     if (!db) return Promise.resolve();
 
     return new Promise((resolve) => {
+        isHydratingProjectState = true;
         try {
             const transaction = db.transaction([PROJECTS_STORE], 'readonly');
             const store = transaction.objectStore(PROJECTS_STORE);
             const request = store.get(currentProjectId);
 
             request.onsuccess = () => {
-                const parsed = request.result;
+                let parsed = request.result;
+                if (!parsed) {
+                    parsed = readStateBackup(currentProjectId);
+                    if (parsed) {
+                        console.warn('Recovered project state from local backup after IndexedDB miss:', currentProjectId);
+                    }
+                }
                 if (parsed) {
                     // Check if this is an old-style project (no per-screenshot settings)
                     const isOldFormat = !parsed.defaults && (parsed.background || parsed.screenshot || parsed.text);
@@ -1628,6 +1740,7 @@ function loadState() {
                                 gradient: parsed.background.gradient || state.defaults.background.gradient,
                                 solid: parsed.background.solid || state.defaults.background.solid,
                                 image: null,
+                                imageSrc: parsed.background.imageSrc || null,
                                 imageFit: parsed.background.imageFit || 'cover',
                                 imageBlur: parsed.background.imageBlur || 0,
                                 overlayColor: parsed.background.overlayColor || '#000000',
@@ -1661,9 +1774,10 @@ function loadState() {
                                 state.screenshots[index] = {
                                     image: null,
                                     name: s.name || 'Blank Screen',
+                                    exportName: s.exportName || '',
                                     deviceType: s.deviceType,
                                     localizedImages: {},
-                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                    background: hydrateBackground(s.background || JSON.parse(JSON.stringify(migratedBackground))),
                                     screenshot: screenshotSettings,
                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                     elements: reconstructElementImages(s.elements),
@@ -1700,9 +1814,35 @@ function loadState() {
                                                 state.screenshots[index] = {
                                                     image: localizedImages[firstLang]?.image, // Legacy compat
                                                     name: s.name,
+                                                    exportName: s.exportName || '',
                                                     deviceType: s.deviceType,
                                                     localizedImages: localizedImages,
-                                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                                    background: hydrateBackground(s.background || JSON.parse(JSON.stringify(migratedBackground))),
+                                                    screenshot: screenshotSettings,
+                                                    text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                                    elements: reconstructElementImages(s.elements),
+                                                    popouts: s.popouts || [],
+                                                    overrides: s.overrides || {}
+                                                };
+                                                loadedCount++;
+                                                checkAllLoaded();
+                                            }
+                                        };
+                                        langImg.onerror = () => {
+                                            langLoadedCount++;
+                                            if (langLoadedCount === langKeys.length) {
+                                                const firstLang = langKeys.find(key => localizedImages[key]) || langKeys[0];
+                                                const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
+                                                if (needs3DMigration) {
+                                                    migrate3DPosition(screenshotSettings);
+                                                }
+                                                state.screenshots[index] = {
+                                                    image: localizedImages[firstLang]?.image || null,
+                                                    name: s.name || 'Screenshot',
+                                                    exportName: s.exportName || '',
+                                                    deviceType: s.deviceType,
+                                                    localizedImages: localizedImages,
+                                                    background: hydrateBackground(s.background || JSON.parse(JSON.stringify(migratedBackground))),
                                                     screenshot: screenshotSettings,
                                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                                     elements: reconstructElementImages(s.elements),
@@ -1745,9 +1885,31 @@ function loadState() {
                                     state.screenshots[index] = {
                                         image: img,
                                         name: s.name,
+                                        exportName: s.exportName || '',
                                         deviceType: s.deviceType,
                                         localizedImages: localizedImages,
-                                        background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                        background: hydrateBackground(s.background || JSON.parse(JSON.stringify(migratedBackground))),
+                                        screenshot: screenshotSettings,
+                                        text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                        elements: reconstructElementImages(s.elements),
+                                        popouts: s.popouts || [],
+                                        overrides: s.overrides || {}
+                                    };
+                                    loadedCount++;
+                                    checkAllLoaded();
+                                };
+                                img.onerror = () => {
+                                    const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
+                                    if (needs3DMigration) {
+                                        migrate3DPosition(screenshotSettings);
+                                    }
+                                    state.screenshots[index] = {
+                                        image: null,
+                                        name: s.name || 'Screenshot',
+                                        exportName: s.exportName || '',
+                                        deviceType: s.deviceType,
+                                        localizedImages: {},
+                                        background: hydrateBackground(s.background || JSON.parse(JSON.stringify(migratedBackground))),
                                         screenshot: screenshotSettings,
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         elements: reconstructElementImages(s.elements),
@@ -1767,6 +1929,7 @@ function loadState() {
                                 syncUIWithState();
                                 updateGradientStopsUI();
                                 updateCanvas();
+                                isHydratingProjectState = false;
 
                                 if (needsMigration && parsed.screenshots.length > 0) {
                                     showMigrationPrompt();
@@ -1779,10 +1942,12 @@ function loadState() {
                         syncUIWithState();
                         updateGradientStopsUI();
                         updateCanvas();
+                        isHydratingProjectState = false;
                     }
 
                     state.selectedIndex = parsed.selectedIndex || 0;
-                    state.outputDevice = parsed.outputDevice || 'iphone-6.9';
+                    state.outputDevice = normalizeOutputDevice(parsed.outputDevice || 'iphone-6.9');
+                    state.exportDevices = normalizeExportDevices(parsed.exportDevices || [state.outputDevice]);
                     state.customWidth = parsed.customWidth || 1320;
                     state.customHeight = parsed.customHeight || 2868;
 
@@ -1793,6 +1958,28 @@ function loadState() {
                     // Load defaults (new format) or use migrated settings
                     if (parsed.defaults) {
                         state.defaults = parsed.defaults;
+                        if (!state.defaults.background) {
+                            state.defaults.background = {
+                                type: 'gradient',
+                                gradient: {
+                                    angle: 135,
+                                    stops: [
+                                        { color: '#667eea', position: 0 },
+                                        { color: '#764ba2', position: 100 }
+                                    ]
+                                },
+                                solid: '#1a1a2e',
+                                image: null,
+                                imageSrc: null,
+                                imageFit: 'cover',
+                                imageBlur: 0,
+                                overlayColor: '#000000',
+                                overlayOpacity: 0,
+                                noise: false,
+                                noiseIntensity: 10
+                            };
+                        }
+                        state.defaults.background = hydrateBackground(state.defaults.background);
                         // Ensure elements array exists (may be missing from older saves)
                         if (!state.defaults.elements) state.defaults.elements = [];
                     } else {
@@ -1804,16 +1991,22 @@ function loadState() {
                     // New project, reset to defaults
                     resetStateToDefaults();
                     updateScreenshotList();
+                    isHydratingProjectState = false;
+                }
+                if (!parsed || !parsed.screenshots || parsed.screenshots.length === 0) {
+                    isHydratingProjectState = false;
                 }
                 resolve();
             };
 
             request.onerror = () => {
                 console.error('Error loading state:', request.error);
+                isHydratingProjectState = false;
                 resolve();
             };
         } catch (e) {
             console.error('Error loading state:', e);
+            isHydratingProjectState = false;
             resolve();
         }
     });
@@ -1845,6 +2038,7 @@ function resetStateToDefaults() {
     state.screenshots = [];
     state.selectedIndex = 0;
     state.outputDevice = 'iphone-6.9';
+    state.exportDevices = ['iphone-6.9'];
     state.customWidth = 1320;
     state.customHeight = 2868;
     state.currentLanguage = 'en';
@@ -1861,6 +2055,7 @@ function resetStateToDefaults() {
             },
             solid: '#1a1a2e',
             image: null,
+            imageSrc: null,
             imageFit: 'cover',
             imageBlur: 0,
             overlayColor: '#000000',
@@ -1935,7 +2130,7 @@ function resetStateToDefaults() {
 // Switch to a different project
 async function switchProject(projectId) {
     // Save current project first
-    saveState();
+    await saveState();
 
     currentProjectId = projectId;
     saveProjectsMeta();
@@ -2035,12 +2230,191 @@ async function duplicateProject(sourceProjectId, customName) {
     });
 }
 
+function sanitizeProjectExportFilename(name) {
+    return (name || 'project')
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .replace(/\s+/g, '-')
+        .replace(/_+/g, '_')
+        .replace(/-+/g, '-')
+        .replace(/^[-_.]+|[-_.]+$/g, '')
+        .toLowerCase() || 'project';
+}
+
+function getUniqueProjectName(baseName) {
+    const trimmed = (baseName || 'Imported Project').trim() || 'Imported Project';
+    const existing = new Set(projects.map(p => p.name.toLowerCase()));
+    if (!existing.has(trimmed.toLowerCase())) return trimmed;
+    let counter = 2;
+    while (existing.has(`${trimmed} (${counter})`.toLowerCase())) {
+        counter++;
+    }
+    return `${trimmed} (${counter})`;
+}
+
+async function readProjectFromStore(projectId) {
+    if (!db) return null;
+    return new Promise((resolve) => {
+        try {
+            const tx = db.transaction([PROJECTS_STORE], 'readonly');
+            const store = tx.objectStore(PROJECTS_STORE);
+            const req = store.get(projectId);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+        } catch (e) {
+            resolve(null);
+        }
+    });
+}
+
+async function exportProject() {
+    const currentProject = projects.find(p => p.id === currentProjectId);
+    if (!currentProject) return;
+
+    // Persist current in-memory edits first so export is always up-to-date.
+    await saveState();
+
+    const stored = await readProjectFromStore(currentProjectId);
+    const projectData = stored || buildSerializableProjectState(currentProjectId);
+    const exportPayload = {
+        schema: 'appscreen-project',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        project: {
+            name: currentProject.name,
+            screenshotCount: projectData.screenshots?.length || 0
+        },
+        data: projectData
+    };
+
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${sanitizeProjectExportFilename(currentProject.name)}.appscreen-project.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+
+async function importProjectFromData(parsedData, fallbackName = 'Imported Project') {
+    if (!db) {
+        await showAppAlert('Project import requires IndexedDB support.', 'error');
+        return;
+    }
+
+    const maybeWrapped = parsedData && typeof parsedData === 'object' ? parsedData : null;
+    const isWrapped = maybeWrapped?.schema === 'appscreen-project' && maybeWrapped?.data;
+    const importedData = isWrapped ? maybeWrapped.data : maybeWrapped;
+
+    if (!importedData || !Array.isArray(importedData.screenshots)) {
+        await showAppAlert('Invalid project file format.', 'error');
+        return;
+    }
+
+    const importedName = (isWrapped ? maybeWrapped?.project?.name : null) || fallbackName;
+    const newName = getUniqueProjectName(importedName);
+    const newId = 'project_' + Date.now();
+
+    const clonedData = JSON.parse(JSON.stringify(importedData));
+    clonedData.id = newId;
+    if (!clonedData.formatVersion) clonedData.formatVersion = 2;
+    if (!Array.isArray(clonedData.projectLanguages) || clonedData.projectLanguages.length === 0) {
+        clonedData.projectLanguages = ['en'];
+    }
+    if (!clonedData.currentLanguage) {
+        clonedData.currentLanguage = clonedData.projectLanguages[0];
+    }
+    if (!Array.isArray(clonedData.exportDevices) || clonedData.exportDevices.length === 0) {
+        clonedData.exportDevices = [clonedData.outputDevice || 'iphone-6.9'];
+    }
+
+    try {
+        await new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction([PROJECTS_STORE], 'readwrite');
+                const store = tx.objectStore(PROJECTS_STORE);
+                store.put(clonedData);
+                tx.oncomplete = resolve;
+                tx.onerror = () => reject(tx.error || new Error('Failed to import project'));
+                tx.onabort = () => reject(tx.error || new Error('Import transaction aborted'));
+            } catch (e) {
+                reject(e);
+            }
+        });
+
+        projects.push({
+            id: newId,
+            name: newName,
+            screenshotCount: clonedData.screenshots.length
+        });
+        saveProjectsMeta();
+
+        await switchProject(newId);
+        updateProjectSelector();
+    } catch (error) {
+        console.error('Project import transaction failed:', error);
+        await showAppAlert('Failed to import project data.', 'error');
+    }
+}
+
+async function importProjectFromFileContent(fileContent, fallbackName = 'Imported Project') {
+    try {
+        const parsed = JSON.parse(fileContent);
+        await importProjectFromData(parsed, fallbackName);
+    } catch (error) {
+        console.error('Failed to import project:', error);
+        await showAppAlert('Failed to parse project file. Please choose a valid JSON export.', 'error');
+    }
+}
+
+async function importProjectFromTauri() {
+    if (!window.__TAURI__) return;
+    try {
+        const selected = await window.__TAURI__.dialog.open({
+            multiple: false,
+            filters: [{ name: 'Project JSON', extensions: ['json'] }]
+        });
+        if (!selected) return;
+        const filePath = Array.isArray(selected) ? selected[0] : selected;
+        const bytes = await window.__TAURI__.fs.readFile(filePath);
+        const content = new TextDecoder().decode(new Uint8Array(bytes));
+        const filename = filePath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'Imported Project';
+        await importProjectFromFileContent(content, filename);
+    } catch (error) {
+        console.error('Tauri project import error:', error);
+        await showAppAlert('Failed to import project file.', 'error');
+    }
+}
+
+async function importProjectFromInput(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+        const content = await file.text();
+        const fallbackName = (file.name || 'Imported Project').replace(/\.[^.]+$/, '');
+        await importProjectFromFileContent(content, fallbackName);
+    } catch (error) {
+        console.error('Project file read error:', error);
+        await showAppAlert('Failed to read project file.', 'error');
+    }
+}
+
+function importProject() {
+    if (window.__TAURI__) {
+        importProjectFromTauri();
+        return;
+    }
+    projectImportInput?.click();
+}
+
 function duplicateScreenshot(index) {
     const original = state.screenshots[index];
     if (!original) return;
 
     const clone = JSON.parse(JSON.stringify({
         name: original.name,
+        exportName: original.exportName || '',
         deviceType: original.deviceType,
         background: original.background,
         screenshot: original.screenshot,
@@ -2130,15 +2504,22 @@ function syncUIWithState() {
     // Update language button
     updateLanguageButton();
 
+    state.outputDevice = normalizeOutputDevice(state.outputDevice);
+    state.exportDevices = normalizeExportDevices(state.exportDevices);
+
     // Device selector dropdown
     document.querySelectorAll('.output-size-menu .device-option').forEach(opt => {
-        opt.classList.toggle('selected', opt.dataset.device === state.outputDevice);
+        const isInExportSelection = state.exportDevices.includes(opt.dataset.device);
+        opt.classList.toggle('selected', isInExportSelection);
+        opt.classList.toggle('primary-selected', opt.dataset.device === state.outputDevice);
     });
 
     // Update dropdown trigger text
     const selectedOption = document.querySelector(`.output-size-menu .device-option[data-device="${state.outputDevice}"]`);
     if (selectedOption) {
-        document.getElementById('output-size-name').textContent = selectedOption.querySelector('.device-option-name').textContent;
+        const selectedCount = state.exportDevices.length;
+        const selectedName = selectedOption.querySelector('.device-option-name').textContent;
+        document.getElementById('output-size-name').textContent = selectedCount > 1 ? `${selectedCount} Platforms` : selectedName;
         if (state.outputDevice === 'custom') {
             document.getElementById('output-size-dims').textContent = `${state.customWidth} × ${state.customHeight}`;
         } else {
@@ -2182,6 +2563,15 @@ function syncUIWithState() {
     document.getElementById('bg-overlay-hex').value = bg.overlayColor;
     document.getElementById('bg-overlay-opacity').value = bg.overlayOpacity;
     document.getElementById('bg-overlay-opacity-value').textContent = formatValue(bg.overlayOpacity) + '%';
+    const bgPreview = document.getElementById('bg-image-preview');
+    const bgPreviewSrc = bg.imageSrc || bg.image?.src || '';
+    if (bgPreviewSrc) {
+        bgPreview.src = bgPreviewSrc;
+        bgPreview.style.display = 'block';
+    } else {
+        bgPreview.removeAttribute('src');
+        bgPreview.style.display = 'none';
+    }
 
     // Noise
     document.getElementById('noise-toggle').classList.toggle('active', bg.noise);
@@ -2646,8 +3036,6 @@ function setupElementEventListeners() {
     bindSlider('element-width', 'width', '%');
     bindSlider('element-rotation', 'rotation', '°');
     bindSlider('element-opacity', 'opacity', '%');
-    bindSlider('element-font-size', 'fontSize', '', parseInt);
-    bindSlider('element-frame-scale', 'frameScale', '%');
 
     // Layer dropdown
     const layerSelect = document.getElementById('element-layer');
@@ -2659,78 +3047,15 @@ function setupElementEventListeners() {
         });
     }
 
-    // Text input
-    const textInput = document.getElementById('element-text-input');
-    if (textInput) {
-        textInput.addEventListener('input', () => {
-            if (!selectedElementId) return;
-            const el = getSelectedElement();
-            if (!el) return;
-            if (!el.texts) el.texts = {};
-            el.texts[state.currentLanguage] = textInput.value;
-            el.text = textInput.value; // sync for backwards compat
-            updateCanvas();
-            updateElementsList();
-        });
-    }
-
-    // Font color
-    const fontColor = document.getElementById('element-font-color');
-    if (fontColor) {
-        fontColor.addEventListener('input', () => {
-            if (selectedElementId) setElementProperty(selectedElementId, 'fontColor', fontColor.value);
-        });
-    }
-
-    // Font weight
-    const fontWeight = document.getElementById('element-font-weight');
-    if (fontWeight) {
-        fontWeight.addEventListener('change', () => {
-            if (selectedElementId) setElementProperty(selectedElementId, 'fontWeight', fontWeight.value);
-        });
-    }
-
-    // Italic button
-    const italicBtn = document.getElementById('element-italic-btn');
-    if (italicBtn) {
-        italicBtn.addEventListener('click', () => {
-            const el = getSelectedElement();
-            if (el) {
-                setElementProperty(el.id, 'italic', !el.italic);
-                italicBtn.classList.toggle('active', el.italic);
-            }
-        });
-    }
-
-    // Frame dropdown
-    const frameSelect = document.getElementById('element-frame');
-    if (frameSelect) {
-        frameSelect.addEventListener('change', () => {
-            if (selectedElementId) {
-                setElementProperty(selectedElementId, 'frame', frameSelect.value);
-                document.getElementById('element-frame-options').style.display =
-                    frameSelect.value !== 'none' ? '' : 'none';
-            }
-        });
-    }
-
-    // Frame color
-    const frameColor = document.getElementById('element-frame-color');
-    const frameColorHex = document.getElementById('element-frame-color-hex');
-    if (frameColor) {
-        frameColor.addEventListener('input', () => {
-            if (selectedElementId) {
-                setElementProperty(selectedElementId, 'frameColor', frameColor.value);
-                if (frameColorHex) frameColorHex.value = frameColor.value;
-            }
-        });
-    }
-    if (frameColorHex) {
-        frameColorHex.addEventListener('change', () => {
-            if (selectedElementId && /^#[0-9a-fA-F]{6}$/.test(frameColorHex.value)) {
-                setElementProperty(selectedElementId, 'frameColor', frameColorHex.value);
-                if (frameColor) frameColor.value = frameColorHex.value;
-            }
+    if (window.TextControls?.setupElementTextControls) {
+        window.TextControls.setupElementTextControls({
+            getSelectedElement,
+            setElementProperty,
+            updateCanvas,
+            updateElementsList,
+            formatValue,
+            state,
+            bindSlider
         });
     }
 
@@ -3706,6 +4031,16 @@ function setupEventListeners() {
         document.getElementById('project-name-input').focus();
     });
 
+    document.getElementById('export-project-btn').addEventListener('click', () => {
+        exportProject();
+    });
+
+    document.getElementById('import-project-btn').addEventListener('click', () => {
+        importProject();
+    });
+
+    projectImportInput?.addEventListener('change', importProjectFromInput);
+
     document.getElementById('duplicate-from-select').addEventListener('change', (e) => {
         const selectedId = e.target.value;
         if (selectedId) {
@@ -3871,6 +4206,18 @@ function setupEventListeners() {
             e.target.value = '';
         }
     });
+    document.getElementById('add-language-mode-select').addEventListener('change', (e) => {
+        handleAddLanguageModeChange(e.target.value);
+    });
+    document.getElementById('add-language-select-all-btn').addEventListener('click', () => {
+        selectAllAddLanguageOptions();
+    });
+    document.getElementById('add-language-apply-btn').addEventListener('click', () => {
+        addSelectedProjectLanguages();
+    });
+    document.getElementById('add-language-all-btn').addEventListener('click', () => {
+        addAllProjectLanguages();
+    });
 
     // Screenshot translations modal events
     document.getElementById('screenshot-translations-modal-close').addEventListener('click', closeScreenshotTranslationsModal);
@@ -4023,13 +4370,21 @@ function setupEventListeners() {
     document.querySelectorAll('.output-size-menu .device-option').forEach(opt => {
         opt.addEventListener('click', (e) => {
             e.stopPropagation();
-            document.querySelectorAll('.output-size-menu .device-option').forEach(o => o.classList.remove('selected'));
-            opt.classList.add('selected');
-            state.outputDevice = opt.dataset.device;
 
-            // Update trigger text
-            document.getElementById('output-size-name').textContent = opt.querySelector('.device-option-name').textContent;
-            document.getElementById('output-size-dims').textContent = opt.querySelector('.device-option-size').textContent;
+            const device = opt.dataset.device;
+            const selected = new Set(state.exportDevices || []);
+
+            if (selected.has(device)) {
+                // Keep at least one platform selected
+                if (selected.size > 1) {
+                    selected.delete(device);
+                }
+            } else {
+                selected.add(device);
+            }
+
+            state.exportDevices = Array.from(selected);
+            state.outputDevice = state.exportDevices.includes(device) ? device : state.exportDevices[0];
 
             // Show/hide custom inputs
             const customInputs = document.getElementById('custom-size-inputs');
@@ -4037,8 +4392,9 @@ function setupEventListeners() {
                 customInputs.classList.add('visible');
             } else {
                 customInputs.classList.remove('visible');
-                outputDropdown.classList.remove('open');
             }
+
+            syncUIWithState();
             updateCanvas();
         });
     });
@@ -4210,6 +4566,7 @@ function setupEventListeners() {
                 const img = new Image();
                 img.onload = () => {
                     setBackground('image', img);
+                    setBackground('imageSrc', event.target.result);
                     document.getElementById('bg-image-preview').src = event.target.result;
                     document.getElementById('bg-image-preview').style.display = 'block';
                     updateCanvas();
@@ -4384,166 +4741,15 @@ function setupEventListeners() {
         updateCanvas();
     });
 
-    // Per-language layout toggle
-    document.getElementById('per-language-layout-toggle').addEventListener('click', function () {
-        this.classList.toggle('active');
-        const enabled = this.classList.contains('active');
-        const text = getTextSettings();
-        if (enabled && !text.perLanguageLayout) {
-            // Seed all language settings from current global values
-            const languages = new Set([...(text.headlineLanguages || ['en']), ...(text.subheadlineLanguages || ['en'])]);
-            if (!text.languageSettings) text.languageSettings = {};
-            languages.forEach(lang => {
-                text.languageSettings[lang] = {
-                    headlineSize: text.headlineSize || 100,
-                    subheadlineSize: text.subheadlineSize || 50,
-                    position: text.position || 'top',
-                    offsetY: typeof text.offsetY === 'number' ? text.offsetY : 12,
-                    lineHeight: text.lineHeight || 110
-                };
-            });
-        }
-        text.perLanguageLayout = enabled;
-        updateCanvas();
-    });
-
-    // Headline toggle
-    document.getElementById('headline-toggle').addEventListener('click', function () {
-        this.classList.toggle('active');
-        const enabled = this.classList.contains('active');
-        setTextValue('headlineEnabled', enabled);
-        const row = this.closest('.toggle-row');
-        if (enabled) {
-            if (row) row.classList.remove('collapsed');
-            document.getElementById('headline-options').style.display = 'block';
-        } else {
-            if (row) row.classList.add('collapsed');
-            document.getElementById('headline-options').style.display = 'none';
-        }
-        updateCanvas();
-    });
-
-    // Subheadline toggle
-    document.getElementById('subheadline-toggle').addEventListener('click', function () {
-        this.classList.toggle('active');
-        const enabled = this.classList.contains('active');
-        setTextValue('subheadlineEnabled', enabled);
-        const row = this.closest('.toggle-row');
-        if (enabled) {
-            if (row) row.classList.remove('collapsed');
-            document.getElementById('subheadline-options').style.display = 'block';
-        } else {
-            if (row) row.classList.add('collapsed');
-            document.getElementById('subheadline-options').style.display = 'none';
-        }
-        updateCanvas();
-    });
-
-    // Text settings
-    document.getElementById('headline-text').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        if (!text.headlines) text.headlines = { en: '' };
-        text.headlines[text.currentHeadlineLang || 'en'] = e.target.value;
-        updateCanvas();
-    });
-
-    // Font picker is initialized separately via initFontPicker()
-
-    document.getElementById('headline-size').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        const lang = text.currentHeadlineLang || 'en';
-        setTextLanguageValue('headlineSize', parseInt(e.target.value) || 100, lang);
-        updateCanvas();
-    });
-
-    document.getElementById('headline-color').addEventListener('input', (e) => {
-        setTextValue('headlineColor', e.target.value);
-        updateCanvas();
-    });
-
-    document.getElementById('headline-weight').addEventListener('change', (e) => {
-        setTextValue('headlineWeight', e.target.value);
-        updateCanvas();
-    });
-
-    // Text style buttons (italic, underline, strikethrough)
-    document.querySelectorAll('#headline-style button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const style = btn.dataset.style;
-            const key = 'headline' + style.charAt(0).toUpperCase() + style.slice(1);
-            const text = getTextSettings();
-            const newValue = !text[key];
-            setTextValue(key, newValue);
-            btn.classList.toggle('active', newValue);
-            updateCanvas();
+    if (window.TextControls?.setupTextPanelControls) {
+        window.TextControls.setupTextPanelControls({
+            getTextSettings,
+            setTextValue,
+            setTextLanguageValue,
+            updateCanvas,
+            formatValue
         });
-    });
-
-    document.querySelectorAll('#text-position button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('#text-position button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            setTextLanguageValue('position', btn.dataset.position);
-            updateCanvas();
-        });
-    });
-
-    document.getElementById('text-offset-y').addEventListener('input', (e) => {
-        setTextLanguageValue('offsetY', parseInt(e.target.value));
-        document.getElementById('text-offset-y-value').textContent = formatValue(e.target.value) + '%';
-        updateCanvas();
-    });
-
-    document.getElementById('line-height').addEventListener('input', (e) => {
-        setTextLanguageValue('lineHeight', parseInt(e.target.value));
-        document.getElementById('line-height-value').textContent = formatValue(e.target.value) + '%';
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-text').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        if (!text.subheadlines) text.subheadlines = { en: '' };
-        text.subheadlines[text.currentSubheadlineLang || 'en'] = e.target.value;
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-size').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        const lang = text.currentSubheadlineLang || 'en';
-        setTextLanguageValue('subheadlineSize', parseInt(e.target.value) || 50, lang);
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-color').addEventListener('input', (e) => {
-        setTextValue('subheadlineColor', e.target.value);
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-opacity').addEventListener('input', (e) => {
-        const value = parseInt(e.target.value) || 70;
-        setTextValue('subheadlineOpacity', value);
-        document.getElementById('subheadline-opacity-value').textContent = formatValue(value) + '%';
-        updateCanvas();
-    });
-
-    // Subheadline weight
-    document.getElementById('subheadline-weight').addEventListener('change', (e) => {
-        setTextValue('subheadlineWeight', e.target.value);
-        updateCanvas();
-    });
-
-    // Subheadline style buttons (italic, underline, strikethrough)
-    document.querySelectorAll('#subheadline-style button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const style = btn.dataset.style;
-            const key = 'subheadline' + style.charAt(0).toUpperCase() + style.slice(1);
-            const text = getTextSettings();
-            const newValue = !text[key];
-            setTextValue(key, newValue);
-            btn.classList.toggle('active', newValue);
-            updateCanvas();
-        });
-    });
+    }
 
     // Export buttons
     document.getElementById('export-current').addEventListener('click', exportCurrent);
@@ -4652,1059 +4858,6 @@ function setupEventListeners() {
 // Per-screenshot mode is now always active (all settings are per-screenshot)
 function isPerScreenshotTextMode() {
     return true;
-}
-
-// Global language picker functions
-function updateLanguageMenu() {
-    const container = document.getElementById('language-menu-items');
-    container.innerHTML = '';
-
-    state.projectLanguages.forEach(lang => {
-        const btn = document.createElement('button');
-        btn.className = 'language-menu-item' + (lang === state.currentLanguage ? ' active' : '');
-        btn.innerHTML = `<span class="flag">${languageFlags[lang] || '🏳️'}</span> ${languageNames[lang] || lang.toUpperCase()}`;
-        btn.onclick = () => {
-            switchGlobalLanguage(lang);
-            document.getElementById('language-menu').classList.remove('visible');
-        };
-        container.appendChild(btn);
-    });
-}
-
-function updateLanguageButton() {
-    const flag = languageFlags[state.currentLanguage] || '🏳️';
-    document.getElementById('language-btn-flag').textContent = flag;
-}
-
-function switchGlobalLanguage(lang) {
-    state.currentLanguage = lang;
-
-    // Update all screenshots to use this language for display
-    state.screenshots.forEach(screenshot => {
-        screenshot.text.currentHeadlineLang = lang;
-        screenshot.text.currentSubheadlineLang = lang;
-    });
-
-    // Update UI
-    updateLanguageButton();
-    syncUIWithState();
-    updateCanvas();
-    saveState();
-}
-
-// Languages modal functions
-function openLanguagesModal() {
-    document.getElementById('language-menu').classList.remove('visible');
-    document.getElementById('languages-modal').classList.add('visible');
-    updateLanguagesList();
-    updateAddLanguageSelect();
-}
-
-function closeLanguagesModal() {
-    document.getElementById('languages-modal').classList.remove('visible');
-}
-
-function updateLanguagesList() {
-    const container = document.getElementById('languages-list');
-    container.innerHTML = '';
-
-    state.projectLanguages.forEach(lang => {
-        const item = document.createElement('div');
-        item.className = 'language-item';
-
-        const flag = languageFlags[lang] || '🏳️';
-        const name = languageNames[lang] || lang.toUpperCase();
-        const isCurrent = lang === state.currentLanguage;
-        const isOnly = state.projectLanguages.length === 1;
-
-        item.innerHTML = `
-            <span class="flag">${flag}</span>
-            <span class="name">${name}</span>
-            ${isCurrent ? '<span class="current-badge">Current</span>' : ''}
-            <button class="remove-btn" ${isOnly ? 'disabled' : ''} title="${isOnly ? 'Cannot remove the only language' : 'Remove language'}">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M18 6L6 18M6 6l12 12"/>
-                </svg>
-            </button>
-        `;
-
-        const removeBtn = item.querySelector('.remove-btn');
-        if (!isOnly) {
-            removeBtn.addEventListener('click', () => removeProjectLanguage(lang));
-        }
-
-        container.appendChild(item);
-    });
-}
-
-function updateAddLanguageSelect() {
-    const select = document.getElementById('add-language-select');
-    select.innerHTML = '<option value="">Add a language...</option>';
-
-    // Add all available languages that aren't already in the project
-    Object.keys(languageNames).forEach(lang => {
-        if (!state.projectLanguages.includes(lang)) {
-            const flag = languageFlags[lang] || '🏳️';
-            const name = languageNames[lang];
-            const option = document.createElement('option');
-            option.value = lang;
-            option.textContent = `${flag} ${name}`;
-            select.appendChild(option);
-        }
-    });
-}
-
-function addProjectLanguage(lang) {
-    if (!lang || state.projectLanguages.includes(lang)) return;
-
-    state.projectLanguages.push(lang);
-
-    // Add the language to all screenshots' text settings
-    state.screenshots.forEach(screenshot => {
-        if (!screenshot.text.headlineLanguages.includes(lang)) {
-            screenshot.text.headlineLanguages.push(lang);
-            if (!screenshot.text.headlines) screenshot.text.headlines = { en: '' };
-            screenshot.text.headlines[lang] = '';
-        }
-        if (!screenshot.text.subheadlineLanguages.includes(lang)) {
-            screenshot.text.subheadlineLanguages.push(lang);
-            if (!screenshot.text.subheadlines) screenshot.text.subheadlines = { en: '' };
-            screenshot.text.subheadlines[lang] = '';
-        }
-    });
-
-    // Also update defaults
-    if (!state.defaults.text.headlineLanguages.includes(lang)) {
-        state.defaults.text.headlineLanguages.push(lang);
-        if (!state.defaults.text.headlines) state.defaults.text.headlines = { en: '' };
-        state.defaults.text.headlines[lang] = '';
-    }
-    if (!state.defaults.text.subheadlineLanguages.includes(lang)) {
-        state.defaults.text.subheadlineLanguages.push(lang);
-        if (!state.defaults.text.subheadlines) state.defaults.text.subheadlines = { en: '' };
-        state.defaults.text.subheadlines[lang] = '';
-    }
-
-    updateLanguagesList();
-    updateAddLanguageSelect();
-    updateLanguageMenu();
-    saveState();
-}
-
-function removeProjectLanguage(lang) {
-    if (state.projectLanguages.length <= 1) return; // Must have at least one language
-
-    const index = state.projectLanguages.indexOf(lang);
-    if (index > -1) {
-        state.projectLanguages.splice(index, 1);
-
-        // If removing the current language, switch to the first available
-        if (state.currentLanguage === lang) {
-            switchGlobalLanguage(state.projectLanguages[0]);
-        }
-
-        // Remove from all screenshots
-        state.screenshots.forEach(screenshot => {
-            const hIndex = screenshot.text.headlineLanguages.indexOf(lang);
-            if (hIndex > -1) {
-                screenshot.text.headlineLanguages.splice(hIndex, 1);
-                delete screenshot.text.headlines[lang];
-            }
-            const sIndex = screenshot.text.subheadlineLanguages.indexOf(lang);
-            if (sIndex > -1) {
-                screenshot.text.subheadlineLanguages.splice(sIndex, 1);
-                delete screenshot.text.subheadlines[lang];
-            }
-            if (screenshot.text.currentHeadlineLang === lang) {
-                screenshot.text.currentHeadlineLang = state.projectLanguages[0];
-            }
-            if (screenshot.text.currentSubheadlineLang === lang) {
-                screenshot.text.currentSubheadlineLang = state.projectLanguages[0];
-            }
-        });
-
-        // Remove from defaults
-        const dhIndex = state.defaults.text.headlineLanguages.indexOf(lang);
-        if (dhIndex > -1) {
-            state.defaults.text.headlineLanguages.splice(dhIndex, 1);
-            delete state.defaults.text.headlines[lang];
-        }
-        const dsIndex = state.defaults.text.subheadlineLanguages.indexOf(lang);
-        if (dsIndex > -1) {
-            state.defaults.text.subheadlineLanguages.splice(dsIndex, 1);
-            delete state.defaults.text.subheadlines[lang];
-        }
-
-        updateLanguagesList();
-        updateAddLanguageSelect();
-        updateLanguageMenu();
-        updateLanguageButton();
-        syncUIWithState();
-        saveState();
-    }
-}
-
-// Language helper functions
-function addHeadlineLanguage(lang, flag) {
-    const text = getTextSettings();
-    if (!text.headlineLanguages.includes(lang)) {
-        text.headlineLanguages.push(lang);
-        if (!text.headlines) text.headlines = { en: '' };
-        text.headlines[lang] = '';
-        updateHeadlineLanguageUI();
-        switchHeadlineLanguage(lang);
-        saveState();
-    }
-}
-
-function addSubheadlineLanguage(lang, flag) {
-    const text = getTextSettings();
-    if (!text.subheadlineLanguages.includes(lang)) {
-        text.subheadlineLanguages.push(lang);
-        if (!text.subheadlines) text.subheadlines = { en: '' };
-        text.subheadlines[lang] = '';
-        updateSubheadlineLanguageUI();
-        switchSubheadlineLanguage(lang);
-        saveState();
-    }
-}
-
-function removeHeadlineLanguage(lang) {
-    const text = getTextSettings();
-    if (lang === 'en') return; // Can't remove default
-
-    const index = text.headlineLanguages.indexOf(lang);
-    if (index > -1) {
-        text.headlineLanguages.splice(index, 1);
-        delete text.headlines[lang];
-
-        if (text.currentHeadlineLang === lang) {
-            text.currentHeadlineLang = 'en';
-        }
-
-        updateHeadlineLanguageUI();
-        switchHeadlineLanguage(text.currentHeadlineLang);
-        saveState();
-    }
-}
-
-function removeSubheadlineLanguage(lang) {
-    const text = getTextSettings();
-    if (lang === 'en') return; // Can't remove default
-
-    const index = text.subheadlineLanguages.indexOf(lang);
-    if (index > -1) {
-        text.subheadlineLanguages.splice(index, 1);
-        delete text.subheadlines[lang];
-
-        if (text.currentSubheadlineLang === lang) {
-            text.currentSubheadlineLang = 'en';
-        }
-
-        updateSubheadlineLanguageUI();
-        switchSubheadlineLanguage(text.currentSubheadlineLang);
-        saveState();
-    }
-}
-
-function switchHeadlineLanguage(lang) {
-    const text = getTextSettings();
-    text.currentHeadlineLang = lang;
-    text.currentLayoutLang = lang;
-
-    // Sync text inputs and layout controls for this language
-    updateTextUI(text);
-    updateCanvas();
-}
-
-function switchSubheadlineLanguage(lang) {
-    const text = getTextSettings();
-    text.currentSubheadlineLang = lang;
-    text.currentLayoutLang = lang;
-
-    // Sync text inputs and layout controls for this language
-    updateTextUI(text);
-    updateCanvas();
-}
-
-function updateHeadlineLanguageUI() {
-    // Language flag UI removed - translations now managed through translate modal
-}
-
-function updateSubheadlineLanguageUI() {
-    // Language flag UI removed - translations now managed through translate modal
-}
-
-// Translate modal functions
-let currentTranslateTarget = null;
-
-const languageNames = {
-    'en': 'English (US)', 'en-gb': 'English (UK)', 'de': 'German', 'fr': 'French',
-    'es': 'Spanish', 'it': 'Italian', 'pt': 'Portuguese', 'pt-br': 'Portuguese (BR)',
-    'nl': 'Dutch', 'ru': 'Russian', 'ja': 'Japanese', 'ko': 'Korean',
-    'zh': 'Chinese (Simplified)', 'zh-tw': 'Chinese (Traditional)', 'ar': 'Arabic',
-    'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish', 'sv': 'Swedish',
-    'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish', 'th': 'Thai',
-    'vi': 'Vietnamese', 'id': 'Indonesian', 'uk': 'Ukrainian'
-};
-
-function openTranslateModal(target) {
-    currentTranslateTarget = target;
-    const text = getTextSettings();
-    const isHeadline = target === 'headline';
-    const isElement = target === 'element';
-
-    let languages, texts;
-    if (isElement) {
-        const el = getSelectedElement();
-        if (!el || el.type !== 'text') return;
-        document.getElementById('translate-target-type').textContent = 'Element Text';
-        languages = state.projectLanguages;
-        if (!el.texts) el.texts = {};
-        texts = el.texts;
-    } else {
-        document.getElementById('translate-target-type').textContent = isHeadline ? 'Headline' : 'Subheadline';
-        languages = isHeadline ? text.headlineLanguages : text.subheadlineLanguages;
-        texts = isHeadline ? text.headlines : text.subheadlines;
-    }
-
-    // Populate source language dropdown (first language selected by default)
-    const sourceSelect = document.getElementById('translate-source-lang');
-    sourceSelect.innerHTML = '';
-    languages.forEach((lang, index) => {
-        const option = document.createElement('option');
-        option.value = lang;
-        option.textContent = `${languageFlags[lang]} ${languageNames[lang] || lang}`;
-        if (index === 0) option.selected = true;
-        sourceSelect.appendChild(option);
-    });
-
-    // Update source preview
-    updateTranslateSourcePreview();
-
-    // Populate target languages
-    const targetsContainer = document.getElementById('translate-targets');
-    targetsContainer.innerHTML = '';
-
-    languages.forEach(lang => {
-        const item = document.createElement('div');
-        item.className = 'translate-target-item';
-        item.dataset.lang = lang;
-        item.innerHTML = `
-            <div class="translate-target-header">
-                <span class="flag">${languageFlags[lang]}</span>
-                <span>${languageNames[lang] || lang}</span>
-            </div>
-            <textarea placeholder="Enter ${languageNames[lang] || lang} translation...">${texts[lang] || ''}</textarea>
-        `;
-        targetsContainer.appendChild(item);
-    });
-
-    document.getElementById('translate-modal').classList.add('visible');
-}
-
-function updateTranslateSourcePreview() {
-    const sourceLang = document.getElementById('translate-source-lang').value;
-    let sourceText;
-    if (currentTranslateTarget === 'element') {
-        const el = getSelectedElement();
-        sourceText = el && el.texts ? (el.texts[sourceLang] || '') : '';
-    } else {
-        const text = getTextSettings();
-        const isHeadline = currentTranslateTarget === 'headline';
-        const texts = isHeadline ? text.headlines : text.subheadlines;
-        sourceText = texts[sourceLang] || '';
-    }
-
-    document.getElementById('source-text-preview').textContent = sourceText || 'No text entered';
-}
-
-function applyTranslations() {
-    const isElement = currentTranslateTarget === 'element';
-
-    if (isElement) {
-        const el = getSelectedElement();
-        if (!el) return;
-        if (!el.texts) el.texts = {};
-
-        document.querySelectorAll('#translate-targets .translate-target-item').forEach(item => {
-            const lang = item.dataset.lang;
-            const textarea = item.querySelector('textarea');
-            el.texts[lang] = textarea.value;
-        });
-        el.text = getElementText(el); // sync for backwards compat
-        document.getElementById('element-text-input').value = getElementText(el);
-    } else {
-        const text = getTextSettings();
-        const isHeadline = currentTranslateTarget === 'headline';
-        const texts = isHeadline ? text.headlines : text.subheadlines;
-
-        document.querySelectorAll('#translate-targets .translate-target-item').forEach(item => {
-            const lang = item.dataset.lang;
-            const textarea = item.querySelector('textarea');
-            texts[lang] = textarea.value;
-        });
-
-        const currentLang = isHeadline ? text.currentHeadlineLang : text.currentSubheadlineLang;
-        if (isHeadline) {
-            document.getElementById('headline-text').value = texts[currentLang] || '';
-        } else {
-            document.getElementById('subheadline-text').value = texts[currentLang] || '';
-            text.subheadlineEnabled = true;
-            syncUIWithState();
-        }
-    }
-
-    saveState();
-    updateCanvas();
-}
-
-async function aiTranslateAll() {
-    const sourceLang = document.getElementById('translate-source-lang').value;
-    const isElement = currentTranslateTarget === 'element';
-    let texts, languages, sourceText;
-    if (isElement) {
-        const el = getSelectedElement();
-        if (!el) return;
-        texts = el.texts || {};
-        languages = state.projectLanguages;
-        sourceText = texts[sourceLang] || '';
-    } else {
-        const text = getTextSettings();
-        const isHeadline = currentTranslateTarget === 'headline';
-        texts = isHeadline ? text.headlines : text.subheadlines;
-        languages = isHeadline ? text.headlineLanguages : text.subheadlineLanguages;
-        sourceText = texts[sourceLang] || '';
-    }
-
-    if (!sourceText.trim()) {
-        setTranslateStatus('Please enter text in the source language first', 'error');
-        return;
-    }
-
-    // Get target languages (all except source)
-    const targetLangs = languages.filter(lang => lang !== sourceLang);
-
-    if (targetLangs.length === 0) {
-        setTranslateStatus('Add more languages to translate to', 'error');
-        return;
-    }
-
-    // Get selected provider and API key
-    const provider = getSelectedProvider();
-    const providerConfig = llmProviders[provider];
-    const apiKey = localStorage.getItem(providerConfig.storageKey);
-
-    if (!apiKey) {
-        setTranslateStatus(`Add your LLM API key in Settings to use AI translation.`, 'error');
-        return;
-    }
-
-    const btn = document.getElementById('ai-translate-btn');
-    btn.disabled = true;
-    btn.classList.add('loading');
-    btn.innerHTML = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2v4m0 12v4m-8-10h4m12 0h4m-5.66-5.66l-2.83 2.83m-5.66 5.66l-2.83 2.83m14.14 0l-2.83-2.83M6.34 6.34L3.51 3.51"/>
-        </svg>
-        <span>Translating...</span>
-    `;
-
-    setTranslateStatus(`Translating to ${targetLangs.length} language(s) with ${providerConfig.name}...`, '');
-
-    // Mark all target items as translating
-    targetLangs.forEach(lang => {
-        const item = document.querySelector(`.translate-target-item[data-lang="${lang}"]`);
-        if (item) item.classList.add('translating');
-    });
-
-    try {
-        // Build the translation prompt
-        const targetLangNames = targetLangs.map(lang => `${languageNames[lang]} (${lang})`).join(', ');
-
-        const prompt = `You are a professional translator for App Store screenshot marketing copy. Translate the following text from ${languageNames[sourceLang]} to these languages: ${targetLangNames}.
-
-The text is a short marketing headline/tagline for an app that must fit on a screenshot, so keep translations:
-- SIMILAR LENGTH to the original - do NOT make it longer, as it must fit on screen
-- Concise and punchy
-- Marketing-focused and compelling
-- Culturally appropriate for each target market
-- Natural-sounding in each language
-
-IMPORTANT: The translated text will be displayed on app screenshots with limited space. If the source text is short, the translation MUST also be short. Prioritize brevity over literal accuracy.
-
-Source text (${languageNames[sourceLang]}):
-"${sourceText}"
-
-Respond ONLY with a valid JSON object mapping language codes to translations. Do not include any other text.
-Example format:
-{"de": "German translation", "fr": "French translation"}
-
-Translate to these language codes: ${targetLangs.join(', ')}`;
-
-        let responseText;
-
-        if (provider === 'anthropic') {
-            responseText = await translateWithAnthropic(apiKey, prompt);
-        } else if (provider === 'openai') {
-            responseText = await translateWithOpenAI(apiKey, prompt);
-        } else if (provider === 'google') {
-            responseText = await translateWithGoogle(apiKey, prompt);
-        }
-
-        // Clean up response - remove markdown code blocks if present
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-        const translations = JSON.parse(responseText);
-
-        // Apply translations to the textareas
-        let translatedCount = 0;
-        targetLangs.forEach(lang => {
-            if (translations[lang]) {
-                const item = document.querySelector(`.translate-target-item[data-lang="${lang}"]`);
-                if (item) {
-                    const textarea = item.querySelector('textarea');
-                    textarea.value = translations[lang];
-                    translatedCount++;
-                }
-            }
-        });
-
-        setTranslateStatus(`✓ Translated to ${translatedCount} language(s)`, 'success');
-
-    } catch (error) {
-        console.error('Translation error:', error);
-
-        if (error.message === 'Failed to fetch') {
-            setTranslateStatus('Connection failed. Check your API key in Settings.', 'error');
-        } else if (error.message === 'AI_UNAVAILABLE' || error.message.includes('401') || error.message.includes('403')) {
-            setTranslateStatus('Invalid API key. Update it in Settings (gear icon).', 'error');
-        } else {
-            setTranslateStatus('Translation failed: ' + error.message, 'error');
-        }
-    } finally {
-        btn.disabled = false;
-        btn.classList.remove('loading');
-        btn.innerHTML = `
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-            </svg>
-            <span>Auto-translate with AI</span>
-        `;
-
-        // Remove translating state
-        document.querySelectorAll('.translate-target-item').forEach(item => {
-            item.classList.remove('translating');
-        });
-    }
-}
-
-// Helper function to show styled alert modal
-function showAppAlert(message, type = 'info') {
-    return new Promise((resolve) => {
-        const iconBg = type === 'error' ? 'rgba(255, 69, 58, 0.2)' :
-            type === 'success' ? 'rgba(52, 199, 89, 0.2)' :
-                'rgba(10, 132, 255, 0.2)';
-        const iconColor = type === 'error' ? '#ff453a' :
-            type === 'success' ? '#34c759' :
-                'var(--accent)';
-        const iconPath = type === 'error' ? '<path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>' :
-            type === 'success' ? '<path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>' :
-                '<path d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>';
-
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay visible';
-        overlay.innerHTML = `
-            <div class="modal">
-                <div class="modal-icon" style="background: ${iconBg};">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: ${iconColor};">
-                        ${iconPath}
-                    </svg>
-                </div>
-                <p class="modal-message" style="margin: 16px 0;">${message}</p>
-                <div class="modal-buttons">
-                    <button class="modal-btn modal-btn-confirm" style="background: var(--accent);">OK</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        const okBtn = overlay.querySelector('.modal-btn-confirm');
-        const close = () => {
-            overlay.remove();
-            resolve();
-        };
-        okBtn.addEventListener('click', close);
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) close();
-        });
-    });
-}
-
-// Helper function to show styled confirm modal
-function showAppConfirm(message, confirmText = 'Confirm', cancelText = 'Cancel') {
-    return new Promise((resolve) => {
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay visible';
-        overlay.innerHTML = `
-            <div class="modal">
-                <div class="modal-icon" style="background: rgba(10, 132, 255, 0.2);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--accent);">
-                        <path d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                    </svg>
-                </div>
-                <p class="modal-message" style="margin: 16px 0; white-space: pre-line;">${message}</p>
-                <div class="modal-buttons">
-                    <button class="modal-btn modal-btn-cancel">${cancelText}</button>
-                    <button class="modal-btn modal-btn-confirm" style="background: var(--accent);">${confirmText}</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        const confirmBtn = overlay.querySelector('.modal-btn-confirm');
-        const cancelBtn = overlay.querySelector('.modal-btn-cancel');
-
-        confirmBtn.addEventListener('click', () => {
-            overlay.remove();
-            resolve(true);
-        });
-        cancelBtn.addEventListener('click', () => {
-            overlay.remove();
-            resolve(false);
-        });
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) {
-                overlay.remove();
-                resolve(false);
-            }
-        });
-    });
-}
-
-// Show translate confirmation dialog with source language selector
-function showTranslateConfirmDialog(providerName) {
-    return new Promise((resolve) => {
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay visible';
-
-        // Default to first project language
-        const defaultLang = state.projectLanguages[0] || 'en';
-
-        // Build language options
-        const languageOptions = state.projectLanguages.map(lang => {
-            const flag = languageFlags[lang] || '🏳️';
-            const name = languageNames[lang] || lang.toUpperCase();
-            const selected = lang === defaultLang ? 'selected' : '';
-            return `<option value="${lang}" ${selected}>${flag} ${name}</option>`;
-        }).join('');
-
-        // Count texts for each language
-        const getTextCount = (lang) => {
-            let count = 0;
-            state.screenshots.forEach(screenshot => {
-                const text = screenshot.text || state.text;
-                if (text.headlines?.[lang]?.trim()) count++;
-                if (text.subheadlines?.[lang]?.trim()) count++;
-            });
-            return count;
-        };
-
-        const initialCount = getTextCount(defaultLang);
-        const targetCount = state.projectLanguages.length - 1;
-
-        overlay.innerHTML = `
-            <div class="modal" style="max-width: 380px;">
-                <div class="modal-icon" style="background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #764ba2;">
-                        <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
-                    </svg>
-                </div>
-                <h3 class="modal-title">Translate All Text</h3>
-                <p class="modal-message" style="margin-bottom: 16px;">Translate headlines and subheadlines from one language to all other project languages.</p>
-
-                <div style="margin-bottom: 16px;">
-                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Source Language</label>
-                    <select id="translate-source-lang" style="width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 14px; cursor: pointer;">
-                        ${languageOptions}
-                    </select>
-                </div>
-
-                <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
-                    <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
-                        <span style="color: var(--text-secondary);">Texts to translate:</span>
-                        <span id="translate-text-count" style="color: var(--text-primary); font-weight: 500;">${initialCount}</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
-                        <span style="color: var(--text-secondary);">Target languages:</span>
-                        <span style="color: var(--text-primary); font-weight: 500;">${targetCount}</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; font-size: 13px;">
-                        <span style="color: var(--text-secondary);">Provider:</span>
-                        <span style="color: var(--text-primary); font-weight: 500;">${providerName}</span>
-                    </div>
-                </div>
-
-                <div class="modal-buttons">
-                    <button class="modal-btn modal-btn-cancel" id="translate-cancel">Cancel</button>
-                    <button class="modal-btn modal-btn-confirm" id="translate-confirm" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">Translate</button>
-                </div>
-            </div>
-        `;
-
-        document.body.appendChild(overlay);
-
-        const select = document.getElementById('translate-source-lang');
-        const countEl = document.getElementById('translate-text-count');
-        const confirmBtn = document.getElementById('translate-confirm');
-        const cancelBtn = document.getElementById('translate-cancel');
-
-        // Update count when language changes
-        select.addEventListener('change', () => {
-            const count = getTextCount(select.value);
-            countEl.textContent = count;
-            confirmBtn.disabled = count === 0;
-            if (count === 0) {
-                confirmBtn.style.opacity = '0.5';
-            } else {
-                confirmBtn.style.opacity = '1';
-            }
-        });
-
-        // Initial state
-        if (initialCount === 0) {
-            confirmBtn.disabled = true;
-            confirmBtn.style.opacity = '0.5';
-        }
-
-        confirmBtn.addEventListener('click', () => {
-            overlay.remove();
-            resolve(select.value);
-        });
-
-        cancelBtn.addEventListener('click', () => {
-            overlay.remove();
-            resolve(null);
-        });
-
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) {
-                overlay.remove();
-                resolve(null);
-            }
-        });
-    });
-}
-
-// Translate all text (headlines + subheadlines) from selected source language to all other project languages
-async function translateAllText() {
-    if (state.projectLanguages.length < 2) {
-        await showAppAlert('Add more languages to your project first (via the language menu).', 'info');
-        return;
-    }
-
-    // Get selected provider and API key
-    const provider = getSelectedProvider();
-    const providerConfig = llmProviders[provider];
-    const apiKey = localStorage.getItem(providerConfig.storageKey);
-
-    if (!apiKey) {
-        await showAppAlert('Add your LLM API key in Settings to use AI translation.', 'error');
-        return;
-    }
-
-    // Show confirmation dialog with source language selector
-    const sourceLang = await showTranslateConfirmDialog(providerConfig.name);
-    if (!sourceLang) return; // User cancelled
-
-    const targetLangs = state.projectLanguages.filter(lang => lang !== sourceLang);
-
-    // Collect all texts that need translation
-    const textsToTranslate = [];
-
-    // Go through all screenshots and collect headlines/subheadlines
-    state.screenshots.forEach((screenshot, index) => {
-        const text = screenshot.text || state.text;
-
-        // Headline
-        const headline = text.headlines?.[sourceLang] || '';
-        if (headline.trim()) {
-            textsToTranslate.push({
-                type: 'headline',
-                screenshotIndex: index,
-                text: headline
-            });
-        }
-
-        // Subheadline
-        const subheadline = text.subheadlines?.[sourceLang] || '';
-        if (subheadline.trim()) {
-            textsToTranslate.push({
-                type: 'subheadline',
-                screenshotIndex: index,
-                text: subheadline
-            });
-        }
-    });
-
-    if (textsToTranslate.length === 0) {
-        await showAppAlert(`No text found in ${languageNames[sourceLang] || sourceLang}. Add headlines or subheadlines first.`, 'info');
-        return;
-    }
-
-    // Create progress dialog with spinner
-    const progressOverlay = document.createElement('div');
-    progressOverlay.className = 'modal-overlay visible';
-    progressOverlay.id = 'translate-progress-overlay';
-    progressOverlay.innerHTML = `
-        <div class="modal" style="text-align: center; min-width: 320px;">
-            <div class="modal-icon" style="background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #764ba2; animation: spin 1s linear infinite;">
-                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-                </svg>
-            </div>
-            <h3 class="modal-title">Translating...</h3>
-            <p class="modal-message" id="translate-progress-text">Sending to AI...</p>
-            <p class="modal-message" id="translate-progress-detail" style="font-size: 11px; color: var(--text-tertiary); margin-top: 8px;"></p>
-        </div>
-        <style>
-            @keyframes spin {
-                from { transform: rotate(0deg); }
-                to { transform: rotate(360deg); }
-            }
-        </style>
-    `;
-    document.body.appendChild(progressOverlay);
-
-    const progressText = document.getElementById('translate-progress-text');
-    const progressDetail = document.getElementById('translate-progress-detail');
-
-    // Helper to update status
-    const updateStatus = (text, detail = '') => {
-        if (progressText) progressText.textContent = text;
-        if (progressDetail) progressDetail.textContent = detail;
-    };
-
-    updateStatus('Sending to AI...', `${textsToTranslate.length} texts to ${targetLangs.length} languages using ${providerConfig.name}`);
-
-    try {
-        // Build a single prompt with all texts
-        const targetLangNames = targetLangs.map(lang => `${languageNames[lang]} (${lang})`).join(', ');
-
-        // Group texts by screenshot for context-aware prompt
-        const screenshotGroups = {};
-        textsToTranslate.forEach((item, i) => {
-            if (!screenshotGroups[item.screenshotIndex]) {
-                screenshotGroups[item.screenshotIndex] = { headline: null, subheadline: null, indices: {} };
-            }
-            screenshotGroups[item.screenshotIndex][item.type] = item.text;
-            screenshotGroups[item.screenshotIndex].indices[item.type] = i;
-        });
-
-        // Build context-rich prompt showing screenshot groupings
-        let contextualTexts = '';
-        Object.keys(screenshotGroups).sort((a, b) => Number(a) - Number(b)).forEach(screenshotIdx => {
-            const group = screenshotGroups[screenshotIdx];
-            contextualTexts += `\nScreenshot ${Number(screenshotIdx) + 1}:\n`;
-            if (group.headline !== null) {
-                contextualTexts += `  [${group.indices.headline}] Headline: "${group.headline}"\n`;
-            }
-            if (group.subheadline !== null) {
-                contextualTexts += `  [${group.indices.subheadline}] Subheadline: "${group.subheadline}"\n`;
-            }
-        });
-
-        const prompt = `You are a professional translator for App Store screenshot marketing copy. Translate the following texts from ${languageNames[sourceLang]} to these languages: ${targetLangNames}.
-
-CONTEXT: These are marketing texts for app store screenshots. Each screenshot has a headline and/or subheadline that work together as a pair. The subheadline typically elaborates on or supports the headline. When translating, ensure:
-- Headlines and subheadlines on the same screenshot remain thematically consistent
-- Translations across all screenshots maintain a cohesive marketing voice
-- SIMILAR LENGTH to the originals - do NOT make translations longer, as they must fit on screen
-- Marketing-focused and compelling language
-- Culturally appropriate for each target market
-- Natural-sounding in each language
-
-IMPORTANT: The translated text will be displayed on app screenshots with limited space. If the source text is short, the translation MUST also be short. Prioritize brevity over literal accuracy.
-
-Source texts (${languageNames[sourceLang]}):
-${contextualTexts}
-
-Respond ONLY with a valid JSON object. The structure should be:
-{
-  "0": {"de": "German translation", "fr": "French translation", ...},
-  "1": {"de": "German translation", "fr": "French translation", ...}
-}
-
-Where the keys (0, 1, etc.) correspond to the text indices [N] shown above.
-Translate to these language codes: ${targetLangs.join(', ')}`;
-
-        let responseText;
-
-        if (provider === 'anthropic') {
-            responseText = await translateWithAnthropic(apiKey, prompt);
-        } else if (provider === 'openai') {
-            responseText = await translateWithOpenAI(apiKey, prompt);
-        } else if (provider === 'google') {
-            responseText = await translateWithGoogle(apiKey, prompt);
-        }
-
-        updateStatus('Processing response...', 'Parsing translations');
-
-        // Clean up response - remove markdown code blocks and extract JSON
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-        // Try to extract JSON object if there's extra text
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            responseText = jsonMatch[0];
-        }
-
-        console.log('Translation response:', responseText.substring(0, 500) + (responseText.length > 500 ? '...' : ''));
-
-        let translations;
-        try {
-            translations = JSON.parse(responseText);
-        } catch (parseError) {
-            console.error('JSON parse error. Response was:', responseText);
-            throw new Error('Failed to parse translation response. The AI may have returned incomplete text.');
-        }
-
-        updateStatus('Applying translations...', 'Updating screenshots');
-
-        // Apply translations
-        let appliedCount = 0;
-        textsToTranslate.forEach((item, index) => {
-            const itemTranslations = translations[index] || translations[String(index)];
-            if (!itemTranslations) return;
-
-            const screenshot = state.screenshots[item.screenshotIndex];
-            const text = screenshot.text || state.text;
-
-            targetLangs.forEach(lang => {
-                if (itemTranslations[lang]) {
-                    if (item.type === 'headline') {
-                        if (!text.headlines) text.headlines = {};
-                        text.headlines[lang] = itemTranslations[lang];
-                    } else {
-                        if (!text.subheadlines) text.subheadlines = {};
-                        text.subheadlines[lang] = itemTranslations[lang];
-                        // Enable subheadline display when translations are added
-                        text.subheadlineEnabled = true;
-                    }
-                    appliedCount++;
-                }
-            });
-        });
-
-        // Update UI
-        syncUIWithState();
-        updateCanvas();
-        saveState();
-
-        // Remove progress overlay
-        progressOverlay.remove();
-
-        await showAppAlert(`Successfully translated ${appliedCount} text(s)!`, 'success');
-
-    } catch (error) {
-        console.error('Translation error:', error);
-        progressOverlay.remove();
-
-        if (error.message === 'Failed to fetch') {
-            await showAppAlert('Connection failed. Check your API key in Settings.', 'error');
-        } else if (error.message === 'AI_UNAVAILABLE' || error.message.includes('401') || error.message.includes('403')) {
-            await showAppAlert('Invalid API key. Update it in Settings (gear icon).', 'error');
-        } else {
-            await showAppAlert('Translation failed: ' + error.message, 'error');
-        }
-    }
-}
-
-// Provider-specific translation functions
-async function translateWithAnthropic(apiKey, prompt) {
-    const model = getSelectedModel('anthropic');
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "anthropic-dangerous-direct-browser-access": "true"
-        },
-        body: JSON.stringify({
-            model: model,
-            max_tokens: 4096,
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        if (status === 401 || status === 403) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
-    }
-
-    const data = await response.json();
-    return data.content[0].text;
-}
-
-async function translateWithOpenAI(apiKey, prompt) {
-    const model = getSelectedModel('openai');
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-            model: model,
-            max_completion_tokens: 16384,
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        const errorBody = await response.json().catch(() => ({}));
-        console.error('OpenAI API Error:', {
-            status,
-            model,
-            error: errorBody
-        });
-        if (status === 401 || status === 403) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status} - ${errorBody.error?.message || 'Unknown error'}`);
-    }
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-}
-
-async function translateWithGoogle(apiKey, prompt) {
-    const model = getSelectedModel('google');
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
-        })
-    });
-
-    if (!response.ok) {
-        const status = response.status;
-        if (status === 401 || status === 403 || status === 400) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
-    }
-
-    const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
-}
-
-function setTranslateStatus(message, type) {
-    const status = document.getElementById('ai-translate-status');
-    status.textContent = message;
-    status.className = 'ai-translate-status' + (type ? ' ' + type : '');
 }
 
 // Settings modal functions
@@ -5836,80 +4989,31 @@ function saveSettings() {
 
 // Helper function to set text value for current screenshot
 function setTextValue(key, value) {
-    setTextSetting(key, value);
+    textApi.setTextValue(key, value);
 }
 
 function setTextLanguageValue(key, value, lang = null) {
-    const text = getTextSettings();
-    if (!text.perLanguageLayout) {
-        // Global mode - write directly to text
-        text[key] = value;
-        return;
-    }
-    const targetLang = lang || getTextLayoutLanguage(text);
-    const settings = getTextLanguageSettings(text, targetLang);
-    settings[key] = value;
-    text.currentLayoutLang = targetLang;
+    textApi.setTextLanguageValue(key, value, lang);
 }
 
 // Helper function to get text settings for current screenshot
 function getTextSettings() {
-    return getText();
+    return textApi.getTextSettings();
 }
 
 // Load text UI from current screenshot's settings
 function loadTextUIFromScreenshot() {
-    updateTextUI(getText());
+    textApi.loadTextUIFromScreenshot();
 }
 
 // Load text UI from default settings
 function loadTextUIFromGlobal() {
-    updateTextUI(state.defaults.text);
+    textApi.loadTextUIFromGlobal();
 }
 
 // Update all text UI elements
 function updateTextUI(text) {
-    const headlineLang = text.currentHeadlineLang || 'en';
-    const subheadlineLang = text.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(text);
-    const headlineLayout = getEffectiveLayout(text, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(text, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(text, layoutLang);
-    const headlineText = text.headlines ? (text.headlines[headlineLang] || '') : (text.headline || '');
-    const subheadlineText = text.subheadlines ? (text.subheadlines[subheadlineLang] || '') : (text.subheadline || '');
-
-    document.getElementById('headline-text').value = headlineText;
-    document.getElementById('headline-font').value = text.headlineFont;
-    updateFontPickerPreview();
-    document.getElementById('headline-size').value = headlineLayout.headlineSize;
-    document.getElementById('headline-color').value = text.headlineColor;
-    document.getElementById('headline-weight').value = text.headlineWeight;
-    // Sync text style buttons
-    document.querySelectorAll('#headline-style button').forEach(btn => {
-        const style = btn.dataset.style;
-        const key = 'headline' + style.charAt(0).toUpperCase() + style.slice(1);
-        btn.classList.toggle('active', text[key] || false);
-    });
-    document.querySelectorAll('#text-position button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.position === layoutSettings.position);
-    });
-    document.getElementById('text-offset-y').value = layoutSettings.offsetY;
-    document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
-    document.getElementById('line-height').value = layoutSettings.lineHeight;
-    document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
-    document.getElementById('subheadline-text').value = subheadlineText;
-    document.getElementById('subheadline-font').value = text.subheadlineFont || text.headlineFont;
-    document.getElementById('subheadline-size').value = subheadlineLayout.subheadlineSize;
-    document.getElementById('subheadline-color').value = text.subheadlineColor;
-    document.getElementById('subheadline-opacity').value = text.subheadlineOpacity;
-    document.getElementById('subheadline-opacity-value').textContent = formatValue(text.subheadlineOpacity) + '%';
-    document.getElementById('subheadline-weight').value = text.subheadlineWeight || '400';
-    // Sync subheadline style buttons
-    document.querySelectorAll('#subheadline-style button').forEach(btn => {
-        const style = btn.dataset.style;
-        const key = 'subheadline' + style.charAt(0).toUpperCase() + style.slice(1);
-        btn.classList.toggle('active', text[key] || false);
-    });
+    textApi.updateTextUI(text);
 }
 
 function applyPositionPreset(preset) {
@@ -5962,17 +5066,101 @@ async function processDesktopFilesSequentially(filesData) {
     }
 }
 
+const TAURI_IMPORT_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+
+function getPathBasename(filePath) {
+    return String(filePath || '').split(/[\\/]/).pop() || '';
+}
+
+function joinFsPath(parent, child) {
+    const useBackslash = String(parent).includes('\\');
+    const sep = useBackslash ? '\\' : '/';
+    const cleanParent = String(parent || '').replace(/[\\/]+$/, '');
+    const cleanChild = String(child || '').replace(/^[\\/]+/, '').replace(/[\\/]+/g, sep);
+    return `${cleanParent}${sep}${cleanChild}`;
+}
+
+function isImageFilePath(filePath) {
+    const name = getPathBasename(filePath);
+    const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+    return TAURI_IMPORT_IMAGE_EXTENSIONS.has(ext);
+}
+
+function normalizeReadDirEntry(entry, parentPath) {
+    if (typeof entry === 'string') {
+        return {
+            path: entry,
+            name: getPathBasename(entry),
+            isDirectory: false
+        };
+    }
+
+    const name = entry?.name || '';
+    const path = entry?.path || joinFsPath(parentPath, name);
+    const isDirectory = entry?.isDirectory === true
+        || entry?.is_file === false
+        || Array.isArray(entry?.children);
+
+    return {
+        path,
+        name: name || getPathBasename(path),
+        isDirectory
+    };
+}
+
+async function collectImageFilePathsRecursively(rootPath) {
+    const queue = [rootPath];
+    const imagePaths = [];
+
+    while (queue.length > 0) {
+        const currentPath = queue.shift();
+        let entries = [];
+        try {
+            entries = await window.__TAURI__.fs.readDir(currentPath);
+        } catch (err) {
+            console.warn('Failed to read directory while importing screenshots:', currentPath, err);
+            continue;
+        }
+
+        for (const rawEntry of entries) {
+            const entry = normalizeReadDirEntry(rawEntry, currentPath);
+            if (!entry.path) continue;
+
+            if (entry.isDirectory) {
+                queue.push(entry.path);
+                continue;
+            }
+
+            if (isImageFilePath(entry.path)) {
+                imagePaths.push(entry.path);
+            }
+        }
+    }
+
+    imagePaths.sort((a, b) => a.localeCompare(b));
+    return imagePaths;
+}
+
 // Import screenshots via Tauri native file dialog
 async function importScreenshotsFromTauri() {
     if (!window.__TAURI__) return;
     try {
         const selected = await window.__TAURI__.dialog.open({
-            multiple: true,
-            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }]
+            directory: true,
+            multiple: false
         });
         if (!selected) return;
-        const paths = Array.isArray(selected) ? selected : [selected];
-        for (const filePath of paths) {
+
+        const selectedDir = Array.isArray(selected) ? selected[0] : selected;
+        if (!selectedDir) return;
+
+        const imagePaths = await collectImageFilePathsRecursively(selectedDir);
+        if (imagePaths.length === 0) {
+            await showAppAlert('No image files found in the selected folder.', 'info');
+            return;
+        }
+
+        for (const filePath of imagePaths) {
             const bytes = await window.__TAURI__.fs.readFile(filePath);
             const blob = new Blob([bytes]);
             const dataUrl = await new Promise((resolve) => {
@@ -5980,7 +5168,7 @@ async function importScreenshotsFromTauri() {
                 reader.onloadend = () => resolve(reader.result);
                 reader.readAsDataURL(blob);
             });
-            const name = filePath.split(/[\\/]/).pop();
+            const name = getPathBasename(filePath);
             await handleFilesFromDesktop([{ dataUrl, name }]);
         }
     } catch (err) {
@@ -6136,9 +5324,10 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
     state.screenshots.push({
         image: img || null, // Keep for legacy compatibility
         name: name || 'Blank Screen',
+        exportName: '',
         deviceType: deviceType,
         localizedImages: localizedImages,
-        background: JSON.parse(JSON.stringify(state.defaults.background)),
+        background: hydrateBackground(JSON.parse(JSON.stringify(state.defaults.background))),
         screenshot: JSON.parse(JSON.stringify(state.defaults.screenshot)),
         text: JSON.parse(JSON.stringify(textDefaults)),
         elements: JSON.parse(JSON.stringify(state.defaults.elements || [])),
@@ -6236,6 +5425,13 @@ function updateScreenshotList() {
                         </svg>
                         Apply style to all...
                     </button>
+                    <button class="screenshot-menu-item screenshot-rename-export" data-index="${index}">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 20h9"/>
+                            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+                        </svg>
+                        Set Export Name...
+                    </button>
                     <button class="screenshot-menu-item screenshot-duplicate" data-index="${index}">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="9" y="9" width="13" height="13" rx="2"/>
@@ -6275,6 +5471,7 @@ function updateScreenshotList() {
                 </svg>
               </div>`
             : `<img class="screenshot-thumb" src="${thumbSrc}" alt="${screenshot.name}">`;
+        const screenshotNameDisplay = (screenshot.exportName || '').trim() || 'appscreen';
 
         item.innerHTML = `
             <div class="drag-handle">
@@ -6286,11 +5483,20 @@ function updateScreenshotList() {
             </div>
             ${thumbHtml}
             <div class="screenshot-info">
-                <div class="screenshot-name">${screenshot.name}</div>
+                <div class="screenshot-name">${screenshotNameDisplay}</div>
                 <div class="screenshot-device">${isTransferTarget ? 'Click source to copy style' : screenshot.deviceType}${langFlagsHtml}</div>
             </div>
             ${buttonsHtml}
         `;
+
+        const nameEl = item.querySelector('.screenshot-name');
+        if (nameEl) {
+            nameEl.title = '双击修改导出名称';
+            nameEl.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+                startInlineExportNameEdit(index, item, nameEl);
+            });
+        }
 
         // Drag and drop handlers
         item.addEventListener('dragstart', (e) => {
@@ -6399,17 +5605,19 @@ function updateScreenshotList() {
             }
 
             // Normal selection
-            state.selectedIndex = index;
-            updateScreenshotList();
-            // Sync all UI with current screenshot's settings
-            syncUIWithState();
-            updateGradientStopsUI();
-            // Update 3D texture if in 3D mode
-            const ss = getScreenshotSettings();
-            if (ss.use3D && typeof updateScreenTexture === 'function') {
-                updateScreenTexture();
+            if (state.selectedIndex !== index) {
+                state.selectedIndex = index;
+                updateScreenshotList();
+                // Sync all UI with current screenshot's settings
+                syncUIWithState();
+                updateGradientStopsUI();
+                // Update 3D texture if in 3D mode
+                const ss = getScreenshotSettings();
+                if (ss.use3D && typeof updateScreenTexture === 'function') {
+                    updateScreenTexture();
+                }
+                updateCanvas();
             }
-            updateCanvas();
         });
 
         // Menu button handler
@@ -6464,6 +5672,15 @@ function updateScreenshotList() {
                 e.stopPropagation();
                 menu?.classList.remove('open');
                 showApplyStyleModal(index);
+            });
+        }
+
+        const renameExportBtn = item.querySelector('.screenshot-rename-export');
+        if (renameExportBtn) {
+            renameExportBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                menu?.classList.remove('open');
+                setScreenshotExportName(index);
             });
         }
 
@@ -6678,6 +5895,69 @@ function replaceScreenshot(index) {
 
     // Trigger file dialog
     fileInput.click();
+}
+
+function setScreenshotExportName(index) {
+    const screenshot = state.screenshots[index];
+    if (!screenshot) return;
+
+    const current = (screenshot.exportName || '').trim();
+    const next = window.prompt(
+        'Set export name for this cover. Leave empty to use default "appscreen".',
+        current
+    );
+
+    if (next === null) return;
+
+    screenshot.exportName = next.trim();
+    updateScreenshotList();
+    saveState();
+}
+
+function startInlineExportNameEdit(index, item, nameEl) {
+    const screenshot = state.screenshots[index];
+    if (!screenshot || !item || !nameEl) return;
+    if (item.dataset.renaming === '1') return;
+
+    item.dataset.renaming = '1';
+    const current = (screenshot.exportName || '').trim();
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'screenshot-name-input';
+    input.placeholder = '默认: appscreen';
+    input.value = current;
+
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let finalized = false;
+    const finalize = (save) => {
+        if (finalized) return;
+        finalized = true;
+        item.dataset.renaming = '0';
+        if (save) {
+            screenshot.exportName = input.value.trim();
+            saveState();
+        }
+        updateScreenshotList();
+    };
+
+    ['mousedown', 'click', 'dblclick'].forEach((evt) => {
+        input.addEventListener(evt, (e) => e.stopPropagation());
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            finalize(true);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            finalize(false);
+        }
+    });
+
+    input.addEventListener('blur', () => finalize(true));
 }
 
 function updateGradientStopsUI() {
@@ -7225,133 +6505,7 @@ function drawDeviceFrameToContext(context, x, y, width, height, settings) {
 }
 
 function drawTextToContext(context, dims, txt) {
-    // Check enabled states (default headline to true for backwards compatibility)
-    const headlineEnabled = txt.headlineEnabled !== false;
-    const subheadlineEnabled = txt.subheadlineEnabled || false;
-
-    const headlineLang = txt.currentHeadlineLang || 'en';
-    const subheadlineLang = txt.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(txt);
-    const headlineLayout = getEffectiveLayout(txt, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(txt, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(txt, layoutLang);
-
-    const headline = headlineEnabled && txt.headlines ? (txt.headlines[headlineLang] || '') : '';
-    const subheadline = subheadlineEnabled && txt.subheadlines ? (txt.subheadlines[subheadlineLang] || '') : '';
-
-    if (!headline && !subheadline) return;
-
-    const padding = dims.width * 0.08;
-    const textY = layoutSettings.position === 'top'
-        ? dims.height * (layoutSettings.offsetY / 100)
-        : dims.height * (1 - layoutSettings.offsetY / 100);
-
-    context.textAlign = 'center';
-    context.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
-
-    let currentY = textY;
-
-    // Draw headline
-    if (headline) {
-        const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
-        context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${txt.headlineFont}`;
-        context.fillStyle = txt.headlineColor;
-
-        const lines = wrapText(context, headline, dims.width - padding * 2);
-        const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
-
-        // For bottom positioning, offset currentY so lines draw correctly
-        if (layoutSettings.position === 'bottom') {
-            currentY -= (lines.length - 1) * lineHeight;
-        }
-
-        let lastLineY;
-        lines.forEach((line, i) => {
-            const y = currentY + i * lineHeight;
-            lastLineY = y;
-            context.fillText(line, dims.width / 2, y);
-
-            // Calculate text metrics for decorations
-            const textWidth = context.measureText(line).width;
-            const fontSize = headlineLayout.headlineSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
-
-            // Draw underline
-            if (txt.headlineUnderline) {
-                const underlineY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.9
-                    : y + fontSize * 0.1;
-                context.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (txt.headlineStrikethrough) {
-                const strikeY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.4
-                    : y - fontSize * 0.4;
-                context.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Track where subheadline should start (below the bottom edge of headline)
-        // The gap between headline and subheadline should be (lineHeight - fontSize)
-        // This is the "extra" spacing beyond the text itself
-        const gap = lineHeight - headlineLayout.headlineSize;
-        if (layoutSettings.position === 'top') {
-            // For top: lastLineY is top of last line, add fontSize to get bottom, then add gap
-            currentY = lastLineY + headlineLayout.headlineSize + gap;
-        } else {
-            // For bottom: lastLineY is already the bottom of last line, just add gap
-            currentY = lastLineY + gap;
-        }
-    }
-
-    // Draw subheadline (always below headline visually)
-    if (subheadline) {
-        const subFontStyle = txt.subheadlineItalic ? 'italic' : 'normal';
-        const subWeight = txt.subheadlineWeight || '400';
-        context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${txt.subheadlineFont || txt.headlineFont}`;
-        context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
-
-        const lines = wrapText(context, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
-
-        // Subheadline starts after headline with gap determined by headline lineHeight
-        // For bottom position, switch to 'top' baseline so subheadline draws downward
-        const subY = currentY;
-        if (layoutSettings.position === 'bottom') {
-            context.textBaseline = 'top';
-        }
-
-        lines.forEach((line, i) => {
-            const y = subY + i * subLineHeight;
-            context.fillText(line, dims.width / 2, y);
-
-            // Calculate text metrics for decorations
-            const textWidth = context.measureText(line).width;
-            const fontSize = subheadlineLayout.subheadlineSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
-
-            // Draw underline (using 'top' baseline for subheadline)
-            if (txt.subheadlineUnderline) {
-                const underlineY = y + fontSize * 0.9;
-                context.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (txt.subheadlineStrikethrough) {
-                const strikeY = y + fontSize * 0.4;
-                context.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Restore baseline if we changed it
-        if (layoutSettings.position === 'bottom') {
-            context.textBaseline = 'bottom';
-        }
-    }
+    textApi.drawTextToContext(context, dims, txt);
 }
 
 // Draw elements for the current screenshot at a specific layer
@@ -7411,26 +6565,30 @@ function drawElementsToContext(context, dims, elements, layer) {
         } else if (el.type === 'text') {
             const elText = getElementText(el);
             if (!elText) { context.restore(); return; }
-            const fontStyle = el.italic ? 'italic' : 'normal';
-            context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
-            context.fillStyle = el.fontColor;
-            context.textAlign = 'center';
-            context.textBaseline = 'middle';
-
-            // Word-wrap text within element width (respects manual line breaks)
-            const lines = wrapText(context, elText, elWidth);
-            const lineHeight = el.fontSize * 1.05;
-            const totalHeight = (lines.length - 1) * lineHeight + el.fontSize;
+            const baseStyle = {
+                font: el.font,
+                fontSize: el.fontSize,
+                fontWeight: el.fontWeight,
+                color: el.fontColor,
+                italic: el.italic,
+                underline: false,
+                strikethrough: false
+            };
+            const runs = parseRichTextMarkup(elText, baseStyle);
+            const richLayout = layoutRichTextRuns(context, runs, elWidth, 1.05, el.fontSize);
 
             // Draw frame behind text if enabled
             if (el.frame && el.frame !== 'none') {
-                drawElementFrame(context, el, dims, elWidth, totalHeight);
+                drawElementFrame(context, el, dims, elWidth, richLayout.totalHeight, richLayout.maxLineWidth);
             }
 
-            // Draw text lines
-            const startY = -(totalHeight / 2) + el.fontSize / 2;
-            lines.forEach((line, i) => {
-                context.fillText(line, 0, startY + i * lineHeight);
+            // Draw rich text lines (markup syntax)
+            const startY = -richLayout.totalHeight / 2;
+            drawRichTextLines(context, richLayout, {
+                centerX: 0,
+                startY,
+                baseColor: el.fontColor,
+                textBaseline: 'top'
             });
         }
 
@@ -7526,13 +6684,18 @@ function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
 }
 
 // Draw decorative frames around text elements
-function drawElementFrame(context, el, dims, textWidth, textHeight) {
+function drawElementFrame(context, el, dims, textWidth, textHeight, measuredMaxLineWidth = null) {
     const scale = el.frameScale / 100;
     const padding = el.fontSize * 0.4 * scale;
-    // Measure the widest line (using wrapText to match rendering)
-    const elWidth = dims.width * (el.width / 100);
-    const lines = wrapText(context, getElementText(el), elWidth);
-    const maxLineW = Math.max(...lines.map(l => context.measureText(l).width));
+    // Measure widest line from rich text layout when available.
+    let maxLineW = measuredMaxLineWidth;
+    if (typeof maxLineW !== 'number') {
+        const elWidth = dims.width * (el.width / 100);
+        const fontStyle = el.italic ? 'italic' : 'normal';
+        context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
+        const lines = wrapText(context, getElementText(el), elWidth);
+        maxLineW = Math.max(...lines.map(l => context.measureText(l).width));
+    }
     const frameW = maxLineW + padding * 2;
     const frameH = textHeight + padding * 2;
 
@@ -7816,137 +6979,7 @@ function drawDeviceFrame(x, y, width, height) {
 }
 
 function drawText() {
-    const dims = getCanvasDimensions();
-    const text = getTextSettings();
-
-    // Check enabled states (default headline to true for backwards compatibility)
-    const headlineEnabled = text.headlineEnabled !== false;
-    const subheadlineEnabled = text.subheadlineEnabled || false;
-
-    const headlineLang = text.currentHeadlineLang || 'en';
-    const subheadlineLang = text.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(text);
-    const headlineLayout = getEffectiveLayout(text, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(text, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(text, layoutLang);
-
-    // Get current language text (only if enabled)
-    const headline = headlineEnabled && text.headlines ? (text.headlines[headlineLang] || '') : '';
-    const subheadline = subheadlineEnabled && text.subheadlines ? (text.subheadlines[subheadlineLang] || '') : '';
-
-    if (!headline && !subheadline) return;
-
-    const padding = dims.width * 0.08;
-    const textY = layoutSettings.position === 'top'
-        ? dims.height * (layoutSettings.offsetY / 100)
-        : dims.height * (1 - layoutSettings.offsetY / 100);
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
-
-    let currentY = textY;
-
-    // Draw headline
-    if (headline) {
-        const fontStyle = text.headlineItalic ? 'italic' : 'normal';
-        ctx.font = `${fontStyle} ${text.headlineWeight} ${headlineLayout.headlineSize}px ${text.headlineFont}`;
-        ctx.fillStyle = text.headlineColor;
-
-        const lines = wrapText(ctx, headline, dims.width - padding * 2);
-        const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
-
-        if (layoutSettings.position === 'bottom') {
-            currentY -= (lines.length - 1) * lineHeight;
-        }
-
-        let lastLineY;
-        lines.forEach((line, i) => {
-            const y = currentY + i * lineHeight;
-            lastLineY = y;
-            ctx.fillText(line, dims.width / 2, y);
-
-            // Calculate text metrics for decorations
-            // When textBaseline is 'top', y is at top of text; when 'bottom', y is at bottom
-            const textWidth = ctx.measureText(line).width;
-            const fontSize = headlineLayout.headlineSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
-
-            // Draw underline
-            if (text.headlineUnderline) {
-                const underlineY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.9  // Below text when baseline is top
-                    : y + fontSize * 0.1; // Below text when baseline is bottom
-                ctx.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (text.headlineStrikethrough) {
-                const strikeY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.4  // Middle of text when baseline is top
-                    : y - fontSize * 0.4; // Middle of text when baseline is bottom
-                ctx.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Track where subheadline should start (below the bottom edge of headline)
-        // The gap between headline and subheadline should be (lineHeight - fontSize)
-        // This is the "extra" spacing beyond the text itself
-        const gap = lineHeight - headlineLayout.headlineSize;
-        if (layoutSettings.position === 'top') {
-            // For top: lastLineY is top of last line, add fontSize to get bottom, then add gap
-            currentY = lastLineY + headlineLayout.headlineSize + gap;
-        } else {
-            // For bottom: lastLineY is already the bottom of last line, just add gap
-            currentY = lastLineY + gap;
-        }
-    }
-
-    // Draw subheadline (always below headline visually)
-    if (subheadline) {
-        const subFontStyle = text.subheadlineItalic ? 'italic' : 'normal';
-        const subWeight = text.subheadlineWeight || '400';
-        ctx.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${text.subheadlineFont || text.headlineFont}`;
-        ctx.fillStyle = hexToRgba(text.subheadlineColor, text.subheadlineOpacity / 100);
-
-        const lines = wrapText(ctx, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
-
-        // Subheadline starts after headline with gap determined by headline lineHeight
-        // For bottom position, switch to 'top' baseline so subheadline draws downward
-        const subY = currentY;
-        if (layoutSettings.position === 'bottom') {
-            ctx.textBaseline = 'top';
-        }
-
-        lines.forEach((line, i) => {
-            const y = subY + i * subLineHeight;
-            ctx.fillText(line, dims.width / 2, y);
-
-            // Calculate text metrics for decorations
-            const textWidth = ctx.measureText(line).width;
-            const fontSize = subheadlineLayout.subheadlineSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
-
-            // Draw underline (using 'top' baseline for subheadline)
-            if (text.subheadlineUnderline) {
-                const underlineY = y + fontSize * 0.9;
-                ctx.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (text.subheadlineStrikethrough) {
-                const strikeY = y + fontSize * 0.4;
-                ctx.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Restore baseline if we changed it
-        if (layoutSettings.position === 'bottom') {
-            ctx.textBaseline = 'bottom';
-        }
-    }
+    textApi.drawText();
 }
 
 function drawNoise() {
@@ -7979,37 +7012,35 @@ function roundRect(ctx, x, y, width, height, radius) {
 }
 
 function wrapText(ctx, text, maxWidth) {
-    const lines = [];
-    const rawLines = String(text).split(/\r?\n/);
+    return textApi.wrapText(ctx, text, maxWidth);
+}
 
-    rawLines.forEach((rawLine) => {
-        if (rawLine === '') {
-            lines.push('');
-            return;
-        }
+function parseRichTextMarkup(text, baseStyle = {}) {
+    return textApi.parseRichTextMarkup(text, baseStyle);
+}
 
-        const words = rawLine.split(' ');
-        let currentLine = '';
+function setContextFontForStyle(context, style) {
+    textApi.setContextFontForStyle(context, style);
+}
 
-        words.forEach(word => {
-            const testLine = currentLine + (currentLine ? ' ' : '') + word;
-            const metrics = ctx.measureText(testLine);
+function measureRichRunText(context, text, style) {
+    return textApi.measureRichRunText(context, text, style);
+}
 
-            if (metrics.width > maxWidth && currentLine) {
-                lines.push(currentLine);
-                currentLine = word;
-            } else {
-                currentLine = testLine;
-            }
-        });
+function splitLongTokenByWidth(context, token, style, maxWidth) {
+    return textApi.splitLongTokenByWidth(context, token, style, maxWidth);
+}
 
-        if (currentLine) {
-            lines.push(currentLine);
-        }
+function layoutRichTextRuns(context, runs, maxWidth, lineHeightFactor = 1.05, minLineHeight = 12) {
+    return textApi.layoutRichTextRuns(context, runs, maxWidth, lineHeightFactor, minLineHeight);
+}
 
-    });
+function createTextGradient(context, x, y, width, colors) {
+    return textApi.createTextGradient(context, x, y, width, colors);
+}
 
-    return lines;
+function drawRichTextLines(context, layout, opts = {}) {
+    textApi.drawRichTextLines(context, layout, opts);
 }
 
 function hexToRgba(hex, alpha) {
@@ -8019,201 +7050,48 @@ function hexToRgba(hex, alpha) {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+const exportManager = createExportManager({
+    state,
+    canvas,
+    updateCanvas,
+    showAppAlert,
+    showExportLanguageDialog,
+    languageNames,
+    languages,
+    JSZipCtor: JSZip,
+    syncUIWithState
+});
+
+function getExportPlatformAndSize() {
+    return exportManager.getExportPlatformAndSize();
+}
+
+function getExportImageFilename(index) {
+    return exportManager.getExportImageFilename(index);
+}
+
 async function exportCurrent() {
-    if (state.screenshots.length === 0) {
-        await showAppAlert('Please upload a screenshot first', 'info');
-        return;
-    }
-
-    // Ensure canvas is up-to-date (especially important for 3D mode)
-    updateCanvas();
-
-    const link = document.createElement('a');
-    link.download = `screenshot-${state.selectedIndex + 1}.png`;
-    link.href = canvas.toDataURL('image/png');
-    link.click();
+    return exportManager.exportCurrent();
 }
 
 async function exportAll() {
-    if (state.screenshots.length === 0) {
-        await showAppAlert('Please upload screenshots first', 'info');
-        return;
-    }
-
-    // Check if project has multiple languages configured
-    const hasMultipleLanguages = state.projectLanguages.length > 1;
-
-    if (hasMultipleLanguages) {
-        // Show language choice dialog
-        showExportLanguageDialog(async (choice) => {
-            if (choice === 'current') {
-                await exportAllForLanguage(state.currentLanguage);
-            } else if (choice === 'all') {
-                await exportAllLanguages();
-            }
-        });
-    } else {
-        // Only one language, export directly
-        await exportAllForLanguage(state.currentLanguage);
-    }
+    return exportManager.exportAll();
 }
 
-// Show export progress modal
 function showExportProgress(status, detail, percent) {
-    const modal = document.getElementById('export-progress-modal');
-    const statusEl = document.getElementById('export-progress-status');
-    const detailEl = document.getElementById('export-progress-detail');
-    const fillEl = document.getElementById('export-progress-fill');
-
-    if (modal) modal.classList.add('visible');
-    if (statusEl) statusEl.textContent = status;
-    if (detailEl) detailEl.textContent = detail || '';
-    if (fillEl) fillEl.style.width = `${percent}%`;
+    return exportManager.showExportProgress(status, detail, percent);
 }
 
-// Hide export progress modal
 function hideExportProgress() {
-    const modal = document.getElementById('export-progress-modal');
-    if (modal) modal.classList.remove('visible');
+    return exportManager.hideExportProgress();
 }
 
-// Export all screenshots for a specific language
 async function exportAllForLanguage(lang) {
-    const originalIndex = state.selectedIndex;
-    const originalLang = state.currentLanguage;
-    const zip = new JSZip();
-    const total = state.screenshots.length;
-
-    // Show progress
-    const langName = languageNames[lang] || lang.toUpperCase();
-    showExportProgress('Exporting...', `Preparing ${langName} screenshots`, 0);
-
-    // Save original text languages for each screenshot
-    const originalTextLangs = state.screenshots.map(s => ({
-        headline: s.text.currentHeadlineLang,
-        subheadline: s.text.currentSubheadlineLang
-    }));
-
-    // Temporarily switch to the target language (images and text)
-    state.currentLanguage = lang;
-    state.screenshots.forEach(s => {
-        s.text.currentHeadlineLang = lang;
-        s.text.currentSubheadlineLang = lang;
-    });
-
-    for (let i = 0; i < state.screenshots.length; i++) {
-        state.selectedIndex = i;
-        updateCanvas();
-
-        // Update progress
-        const percent = Math.round(((i + 1) / total) * 90); // Reserve 10% for ZIP generation
-        showExportProgress('Exporting...', `Screenshot ${i + 1} of ${total}`, percent);
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        // Get canvas data as base64, strip the data URL prefix
-        const dataUrl = canvas.toDataURL('image/png');
-        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-        zip.file(`screenshot-${i + 1}.png`, base64Data, { base64: true });
-    }
-
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-    });
-    updateCanvas();
-
-    // Generate ZIP
-    showExportProgress('Generating ZIP...', '', 95);
-    const content = await zip.generateAsync({ type: 'blob' });
-
-    showExportProgress('Complete!', '', 100);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    hideExportProgress();
-
-    const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
-    link.href = URL.createObjectURL(content);
-    link.click();
-    URL.revokeObjectURL(link.href);
+    return exportManager.exportAllForLanguage(lang);
 }
 
-// Export all screenshots for all languages (separate folders)
 async function exportAllLanguages() {
-    const originalIndex = state.selectedIndex;
-    const originalLang = state.currentLanguage;
-    const zip = new JSZip();
-
-    const totalLangs = state.projectLanguages.length;
-    const totalScreenshots = state.screenshots.length;
-    const totalItems = totalLangs * totalScreenshots;
-    let completedItems = 0;
-
-    // Show progress
-    showExportProgress('Exporting...', 'Preparing all languages', 0);
-
-    // Save original text languages for each screenshot
-    const originalTextLangs = state.screenshots.map(s => ({
-        headline: s.text.currentHeadlineLang,
-        subheadline: s.text.currentSubheadlineLang
-    }));
-
-    for (let langIdx = 0; langIdx < state.projectLanguages.length; langIdx++) {
-        const lang = state.projectLanguages[langIdx];
-        const langName = languageNames[lang] || lang.toUpperCase();
-
-        // Temporarily switch to this language (images and text)
-        state.currentLanguage = lang;
-        state.screenshots.forEach(s => {
-            s.text.currentHeadlineLang = lang;
-            s.text.currentSubheadlineLang = lang;
-        });
-
-        for (let i = 0; i < state.screenshots.length; i++) {
-            state.selectedIndex = i;
-            updateCanvas();
-
-            completedItems++;
-            const percent = Math.round((completedItems / totalItems) * 90); // Reserve 10% for ZIP
-            showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${totalScreenshots}`, percent);
-
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            // Get canvas data as base64, strip the data URL prefix
-            const dataUrl = canvas.toDataURL('image/png');
-            const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-            // Use language code as folder name
-            zip.file(`${lang}/screenshot-${i + 1}.png`, base64Data, { base64: true });
-        }
-    }
-
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-    });
-    updateCanvas();
-
-    // Generate ZIP
-    showExportProgress('Generating ZIP...', '', 95);
-    const content = await zip.generateAsync({ type: 'blob' });
-
-    showExportProgress('Complete!', '', 100);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    hideExportProgress();
-
-    const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_all-languages.zip`;
-    link.href = URL.createObjectURL(content);
-    link.click();
-    URL.revokeObjectURL(link.href);
+    return exportManager.exportAllLanguages();
 }
 
 // ===== Emoji Picker (inline dropdown) =====

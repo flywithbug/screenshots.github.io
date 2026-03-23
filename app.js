@@ -138,6 +138,18 @@ function normalizeOutputDevice(device) {
     return first || 'iphone-6.9';
 }
 
+function ensureDevicePrimaryButtons() {
+    document.querySelectorAll('.output-size-menu .device-option').forEach(opt => {
+        if (opt.querySelector('.device-primary-btn')) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'device-primary-btn';
+        btn.textContent = 'Set';
+        btn.title = 'Set as primary output device';
+        opt.appendChild(btn);
+    });
+}
+
 // Runtime-only state (not persisted)
 let selectedElementId = null;
 let selectedPopoutId = null;
@@ -2642,8 +2654,15 @@ function syncUIWithState() {
     // Device selector dropdown
     document.querySelectorAll('.output-size-menu .device-option').forEach(opt => {
         const isInExportSelection = state.exportDevices.includes(opt.dataset.device);
+        const isPrimary = opt.dataset.device === state.outputDevice;
         opt.classList.toggle('selected', isInExportSelection);
-        opt.classList.toggle('primary-selected', opt.dataset.device === state.outputDevice);
+        opt.classList.toggle('primary-selected', isPrimary);
+        const primaryBtn = opt.querySelector('.device-primary-btn');
+        if (primaryBtn) {
+            primaryBtn.classList.toggle('active', isPrimary);
+            primaryBtn.textContent = isPrimary ? 'Primary' : 'Set';
+            primaryBtn.disabled = isPrimary;
+        }
     });
 
     // Update dropdown trigger text
@@ -4499,7 +4518,24 @@ function setupEventListeners() {
     });
 
     // Device option selection
+    ensureDevicePrimaryButtons();
     document.querySelectorAll('.output-size-menu .device-option').forEach(opt => {
+        const primaryBtn = opt.querySelector('.device-primary-btn');
+        if (primaryBtn) {
+            primaryBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const device = opt.dataset.device;
+                const selected = new Set(state.exportDevices || []);
+                if (!selected.has(device)) {
+                    selected.add(device);
+                    state.exportDevices = Array.from(selected);
+                }
+                state.outputDevice = device;
+                syncUIWithState();
+                updateCanvas();
+            });
+        }
+
         opt.addEventListener('click', (e) => {
             e.stopPropagation();
 
@@ -4521,21 +4557,6 @@ function setupEventListeners() {
             if (!state.exportDevices.includes(state.outputDevice)) {
                 state.outputDevice = state.exportDevices[0];
             }
-
-            syncUIWithState();
-            updateCanvas();
-        });
-
-        opt.addEventListener('dblclick', (e) => {
-            e.stopPropagation();
-
-            const device = opt.dataset.device;
-            const selected = new Set(state.exportDevices || []);
-            if (!selected.has(device)) {
-                selected.add(device);
-                state.exportDevices = Array.from(selected);
-            }
-            state.outputDevice = device;
 
             syncUIWithState();
             updateCanvas();

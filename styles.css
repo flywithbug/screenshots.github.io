@@ -1160,9 +1160,10 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .output-size-menu .device-option {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto auto;
     align-items: center;
+    column-gap: 8px;
     padding: 8px 10px;
     border-radius: 6px;
     cursor: pointer;
@@ -1179,13 +1180,6 @@ input[type="range"]::-webkit-slider-thumb {
     background: var(--accent-subtle-strong);
 }
 
-.output-size-menu .device-option.primary-selected .device-option-name::after {
-    content: ' (Primary)';
-    font-size: 10px;
-    color: var(--text-secondary);
-    font-weight: 400;
-}
-
 .output-size-menu .device-option-name {
     font-size: 12px;
     font-weight: 500;
@@ -1194,6 +1188,31 @@ input[type="range"]::-webkit-slider-thumb {
 .output-size-menu .device-option-size {
     font-size: 10px;
     color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.output-size-menu .device-primary-btn {
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.output-size-menu .device-primary-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.output-size-menu .device-primary-btn.active {
+    border-color: var(--accent);
+    background: var(--accent-subtle-strong);
+    color: var(--accent);
+    cursor: default;
 }
 
 .output-size-divider {

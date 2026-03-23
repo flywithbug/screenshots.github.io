@@ -95,27 +95,39 @@ function getScreenshotImage(screenshot) {
     if (!screenshot) return null;
 
     const lang = state.currentLanguage;
+    const device = state.outputDevice;
+    const pickImage = (images) => {
+        if (!images) return null;
 
-    // Try current language first
-    if (screenshot.localizedImages?.[lang]?.image) {
-        return screenshot.localizedImages[lang].image;
-    }
-
-    // Fallback to first available language in project order
-    for (const l of state.projectLanguages) {
-        if (screenshot.localizedImages?.[l]?.image) {
-            return screenshot.localizedImages[l].image;
+        if (images?.[lang]?.image) {
+            return images[lang].image;
         }
-    }
 
-    // Fallback to any available language
-    if (screenshot.localizedImages) {
-        for (const l of Object.keys(screenshot.localizedImages)) {
-            if (screenshot.localizedImages[l]?.image) {
-                return screenshot.localizedImages[l].image;
+        for (const l of state.projectLanguages) {
+            if (images?.[l]?.image) {
+                return images[l].image;
             }
         }
+
+        for (const l of Object.keys(images)) {
+            if (images[l]?.image) {
+                return images[l].image;
+            }
+        }
+
+        return null;
+    };
+
+    // Device-specific image first
+    if (typeof getLocalizedImagesForDevice === 'function') {
+        const deviceImages = getLocalizedImagesForDevice(screenshot, device, false);
+        const deviceImage = pickImage(deviceImages);
+        if (deviceImage) return deviceImage;
     }
+
+    // Fallback to default iPhone image set
+    const baseImage = pickImage(screenshot.localizedImages);
+    if (baseImage) return baseImage;
 
     // Legacy fallback for old screenshot format
     return screenshot.image || null;
@@ -189,15 +201,20 @@ function addLocalizedImage(screenshotIndex, lang, image, src, name) {
     const screenshot = state.screenshots[screenshotIndex];
     if (!screenshot) return;
 
-    if (!screenshot.localizedImages) {
-        screenshot.localizedImages = {};
-    }
+    const localizedImages = typeof getLocalizedImagesForDevice === 'function'
+        ? getLocalizedImagesForDevice(screenshot, state.outputDevice, true)
+        : (screenshot.localizedImages || (screenshot.localizedImages = {}));
 
-    screenshot.localizedImages[lang] = {
+    localizedImages[lang] = {
         image: image,
         src: src,
         name: name
     };
+
+    // Keep legacy field aligned for fallback iPhone device.
+    if (typeof isFallbackDevice === 'function' && isFallbackDevice(state.outputDevice)) {
+        screenshot.image = image;
+    }
 
     // Auto-add language to project if not already present
     if (!state.projectLanguages.includes(lang)) {
@@ -217,9 +234,14 @@ function addLocalizedImage(screenshotIndex, lang, image, src, name) {
  */
 function removeLocalizedImage(screenshotIndex, lang) {
     const screenshot = state.screenshots[screenshotIndex];
-    if (!screenshot?.localizedImages?.[lang]) return;
+    if (!screenshot) return;
 
-    delete screenshot.localizedImages[lang];
+    const localizedImages = typeof getLocalizedImagesForDevice === 'function'
+        ? getLocalizedImagesForDevice(screenshot, state.outputDevice, false)
+        : screenshot.localizedImages;
+
+    if (!localizedImages?.[lang]) return;
+    delete localizedImages[lang];
 
     // Update displays
     updateScreenshotList();
@@ -269,11 +291,14 @@ function updateScreenshotTranslationsList() {
 
     const screenshot = state.screenshots[currentTranslationsIndex];
     if (!screenshot) return;
+    const localizedImages = typeof getLocalizedImagesForDevice === 'function'
+        ? getLocalizedImagesForDevice(screenshot, state.outputDevice, false)
+        : screenshot.localizedImages;
 
     container.innerHTML = '';
 
     state.projectLanguages.forEach(lang => {
-        const hasImage = screenshot.localizedImages?.[lang]?.image;
+        const hasImage = localizedImages?.[lang]?.image;
         const flag = languageFlags[lang] || '🏳️';
         const name = getLanguageLabel(lang);
 
@@ -286,7 +311,7 @@ function updateScreenshotTranslationsList() {
             thumbCanvas.width = 40;
             thumbCanvas.height = 86;
             const ctx = thumbCanvas.getContext('2d');
-            const img = screenshot.localizedImages[lang].image;
+            const img = localizedImages[lang].image;
             const scale = Math.min(40 / img.width, 86 / img.height);
             const w = img.width * scale;
             const h = img.height * scale;

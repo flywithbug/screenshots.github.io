@@ -101,6 +101,7 @@ const state = {
 
 const baseTextDefaults = JSON.parse(JSON.stringify(state.defaults.text));
 let textApi = null;
+const DEFAULT_FALLBACK_DEVICE = 'iphone-6.9';
 
 function initTextApi() {
     if (!window.TextModule?.createTextApi) return;
@@ -156,9 +157,62 @@ function getCurrentScreenshot() {
     return state.screenshots[state.selectedIndex];
 }
 
+function isFallbackDevice(device = state.outputDevice) {
+    return device === DEFAULT_FALLBACK_DEVICE;
+}
+
+function getDeviceOverrideBucket(screenshot, device = state.outputDevice, createIfMissing = false) {
+    if (!screenshot || isFallbackDevice(device)) return null;
+
+    if (!screenshot.deviceOverrides) {
+        if (!createIfMissing) return null;
+        screenshot.deviceOverrides = {};
+    }
+
+    if (!screenshot.deviceOverrides[device] && createIfMissing) {
+        screenshot.deviceOverrides[device] = {
+            localizedImages: {},
+            background: hydrateBackground(JSON.parse(JSON.stringify(screenshot.background || state.defaults.background)))
+        };
+    }
+
+    return screenshot.deviceOverrides[device] || null;
+}
+
+function getLocalizedImagesForDevice(screenshot, device = state.outputDevice, createIfMissing = false) {
+    if (!screenshot) return null;
+
+    const deviceBucket = getDeviceOverrideBucket(screenshot, device, createIfMissing);
+    if (deviceBucket) {
+        if (!deviceBucket.localizedImages && createIfMissing) {
+            deviceBucket.localizedImages = {};
+        }
+        return deviceBucket.localizedImages || {};
+    }
+
+    if (!screenshot.localizedImages && createIfMissing) {
+        screenshot.localizedImages = {};
+    }
+    return screenshot.localizedImages || {};
+}
+
+function getBackgroundForDevice(screenshot, device = state.outputDevice, createIfMissing = false) {
+    if (!screenshot) return state.defaults.background;
+
+    const deviceBucket = getDeviceOverrideBucket(screenshot, device, createIfMissing);
+    if (deviceBucket) {
+        if (!deviceBucket.background && createIfMissing) {
+            deviceBucket.background = hydrateBackground(JSON.parse(JSON.stringify(screenshot.background || state.defaults.background)));
+        }
+        if (deviceBucket.background) return deviceBucket.background;
+    }
+
+    return screenshot.background;
+}
+
 function getBackground() {
     const screenshot = getCurrentScreenshot();
-    return screenshot ? screenshot.background : state.defaults.background;
+    return screenshot ? getBackgroundForDevice(screenshot, state.outputDevice, false) : state.defaults.background;
 }
 
 function getScreenshotSettings() {
@@ -527,20 +581,21 @@ function formatValue(num) {
 function setBackground(key, value) {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
+        const targetBackground = getBackgroundForDevice(screenshot, state.outputDevice, true);
         if (key === 'image') {
-            screenshot.background.image = value;
-            screenshot.background.imageSrc = value?.src || null;
+            targetBackground.image = value;
+            targetBackground.imageSrc = value?.src || null;
             return;
         }
         if (key.includes('.')) {
             const parts = key.split('.');
-            let obj = screenshot.background;
+            let obj = targetBackground;
             for (let i = 0; i < parts.length - 1; i++) {
                 obj = obj[parts[i]];
             }
             obj[parts[parts.length - 1]] = value;
         } else {
-            screenshot.background[key] = value;
+            targetBackground[key] = value;
         }
     }
 }
@@ -571,14 +626,94 @@ function setTextSetting(key, value) {
 function setCurrentScreenshotAsDefault() {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
-        state.defaults.background = JSON.parse(JSON.stringify(screenshot.background));
-        if (!state.defaults.background.imageSrc && screenshot.background?.image?.src) {
-            state.defaults.background.imageSrc = screenshot.background.image.src;
+        const currentBackground = getBackground();
+        state.defaults.background = JSON.parse(JSON.stringify(currentBackground));
+        if (!state.defaults.background.imageSrc && currentBackground?.image?.src) {
+            state.defaults.background.imageSrc = currentBackground.image.src;
         }
         state.defaults.background.image = null;
         state.defaults.screenshot = JSON.parse(JSON.stringify(screenshot.screenshot));
         state.defaults.text = JSON.parse(JSON.stringify(screenshot.text));
     }
+}
+
+function hydrateLocalizedImagesMap(localizedImages) {
+    const hydrated = {};
+    if (!localizedImages || typeof localizedImages !== 'object') return hydrated;
+
+    Object.keys(localizedImages).forEach(lang => {
+        const langData = localizedImages[lang];
+        if (!langData?.src) return;
+
+        const img = new Image();
+        img.onload = () => updateCanvas();
+        img.src = langData.src;
+        hydrated[lang] = {
+            image: img,
+            src: langData.src,
+            name: langData.name
+        };
+    });
+
+    return hydrated;
+}
+
+function serializeLocalizedImagesMap(localizedImages) {
+    const serialized = {};
+    if (!localizedImages || typeof localizedImages !== 'object') return serialized;
+
+    Object.keys(localizedImages).forEach(lang => {
+        const langData = localizedImages[lang];
+        const src = langData?.src || langData?.image?.src || null;
+        if (!src) return;
+        serialized[lang] = {
+            src,
+            name: langData?.name
+        };
+    });
+
+    return serialized;
+}
+
+function hydrateDeviceOverrides(deviceOverrides) {
+    const hydrated = {};
+    if (!deviceOverrides || typeof deviceOverrides !== 'object') return hydrated;
+
+    Object.keys(deviceOverrides).forEach(device => {
+        const bucket = deviceOverrides[device] || {};
+        hydrated[device] = {
+            localizedImages: hydrateLocalizedImagesMap(bucket.localizedImages),
+            background: hydrateBackground(bucket.background || JSON.parse(JSON.stringify(state.defaults.background)))
+        };
+    });
+
+    return hydrated;
+}
+
+function serializeDeviceOverrides(deviceOverrides) {
+    const serialized = {};
+    if (!deviceOverrides || typeof deviceOverrides !== 'object') return serialized;
+
+    Object.keys(deviceOverrides).forEach(device => {
+        const bucket = deviceOverrides[device];
+        if (!bucket) return;
+        serialized[device] = {
+            localizedImages: serializeLocalizedImagesMap(bucket.localizedImages),
+            background: {
+                ...(bucket.background || state.defaults.background),
+                image: null,
+                imageSrc: bucket.background?.imageSrc || bucket.background?.image?.src || null
+            }
+        };
+    });
+
+    return serialized;
+}
+
+function hydrateScreenshotDeviceData(screenshot) {
+    if (!screenshot || typeof screenshot !== 'object') return screenshot;
+    screenshot.deviceOverrides = hydrateDeviceOverrides(screenshot.deviceOverrides);
+    return screenshot;
 }
 
 function hydrateBackground(background) {
@@ -1535,19 +1670,7 @@ document.addEventListener('visibilitychange', () => {
 function buildSerializableProjectState(projectId = currentProjectId) {
     // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
     const screenshotsToSave = state.screenshots.map(s => {
-        // Save localized images (without Image objects, just src/name)
-        const localizedImages = {};
-        if (s.localizedImages) {
-            Object.keys(s.localizedImages).forEach(lang => {
-                const langData = s.localizedImages[lang];
-                if (langData?.src) {
-                    localizedImages[lang] = {
-                        src: langData.src,
-                        name: langData.name
-                    };
-                }
-            });
-        }
+        const localizedImages = serializeLocalizedImagesMap(s.localizedImages);
 
         return {
             src: s.image?.src || '', // Legacy compatibility
@@ -1555,6 +1678,7 @@ function buildSerializableProjectState(projectId = currentProjectId) {
             exportName: s.exportName || '',
             deviceType: s.deviceType,
             localizedImages: localizedImages,
+            deviceOverrides: serializeDeviceOverrides(s.deviceOverrides),
             background: {
                 ...s.background,
                 image: null,
@@ -1782,6 +1906,7 @@ function loadState() {
                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                     elements: reconstructElementImages(s.elements),
                                     popouts: s.popouts || [],
+                                    deviceOverrides: s.deviceOverrides || {},
                                     overrides: s.overrides || {}
                                 };
                                 loadedCount++;
@@ -1822,6 +1947,7 @@ function loadState() {
                                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                                     elements: reconstructElementImages(s.elements),
                                                     popouts: s.popouts || [],
+                                                    deviceOverrides: s.deviceOverrides || {},
                                                     overrides: s.overrides || {}
                                                 };
                                                 loadedCount++;
@@ -1847,6 +1973,7 @@ function loadState() {
                                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                                     elements: reconstructElementImages(s.elements),
                                                     popouts: s.popouts || [],
+                                                    deviceOverrides: s.deviceOverrides || {},
                                                     overrides: s.overrides || {}
                                                 };
                                                 loadedCount++;
@@ -1893,6 +2020,7 @@ function loadState() {
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         elements: reconstructElementImages(s.elements),
                                         popouts: s.popouts || [],
+                                        deviceOverrides: s.deviceOverrides || {},
                                         overrides: s.overrides || {}
                                     };
                                     loadedCount++;
@@ -1914,6 +2042,7 @@ function loadState() {
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         elements: reconstructElementImages(s.elements),
                                         popouts: s.popouts || [],
+                                        deviceOverrides: s.deviceOverrides || {},
                                         overrides: s.overrides || {}
                                     };
                                     loadedCount++;
@@ -1925,6 +2054,7 @@ function loadState() {
 
                         function checkAllLoaded() {
                             if (loadedCount === totalToLoad) {
+                                state.screenshots = state.screenshots.map(hydrateScreenshotDeviceData);
                                 updateScreenshotList();
                                 syncUIWithState();
                                 updateGradientStopsUI();
@@ -2419,7 +2549,8 @@ function duplicateScreenshot(index) {
         background: original.background,
         screenshot: original.screenshot,
         text: original.text,
-        overrides: original.overrides
+        overrides: original.overrides,
+        deviceOverrides: serializeDeviceOverrides(original.deviceOverrides)
     }));
 
     const nameParts = clone.name.split('.');
@@ -2451,6 +2582,7 @@ function duplicateScreenshot(index) {
         img.src = original.image.src;
         clone.image = img;
     }
+    clone.deviceOverrides = hydrateDeviceOverrides(clone.deviceOverrides);
 
     state.screenshots.splice(index + 1, 0, clone);
     state.selectedIndex = index + 1;
@@ -4384,15 +4516,26 @@ function setupEventListeners() {
             }
 
             state.exportDevices = Array.from(selected);
-            state.outputDevice = state.exportDevices.includes(device) ? device : state.exportDevices[0];
-
-            // Show/hide custom inputs
-            const customInputs = document.getElementById('custom-size-inputs');
-            if (state.outputDevice === 'custom') {
-                customInputs.classList.add('visible');
-            } else {
-                customInputs.classList.remove('visible');
+            // Single-click only updates selected export devices.
+            // Keep primary unchanged unless it was removed.
+            if (!state.exportDevices.includes(state.outputDevice)) {
+                state.outputDevice = state.exportDevices[0];
             }
+
+            syncUIWithState();
+            updateCanvas();
+        });
+
+        opt.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+
+            const device = opt.dataset.device;
+            const selected = new Set(state.exportDevices || []);
+            if (!selected.has(device)) {
+                selected.add(device);
+                state.exportDevices = Array.from(selected);
+            }
+            state.outputDevice = device;
 
             syncUIWithState();
             updateCanvas();
@@ -5332,6 +5475,7 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
         text: JSON.parse(JSON.stringify(textDefaults)),
         elements: JSON.parse(JSON.stringify(state.defaults.elements || [])),
         popouts: [],
+        deviceOverrides: {},
         // Legacy overrides for backwards compatibility
         overrides: {}
     });
@@ -5738,12 +5882,9 @@ function transferStyle(sourceIndex, targetIndex) {
         return;
     }
 
-    // Deep copy background settings
-    target.background = JSON.parse(JSON.stringify(source.background));
-    // Handle background image separately (not JSON serializable)
-    if (source.background.image) {
-        target.background.image = source.background.image;
-    }
+    // Deep copy background settings (including per-device overrides)
+    target.background = hydrateBackground(JSON.parse(JSON.stringify(source.background)));
+    target.deviceOverrides = hydrateDeviceOverrides(serializeDeviceOverrides(source.deviceOverrides));
 
     // Deep copy screenshot settings
     target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
@@ -5801,12 +5942,9 @@ function applyStyleToAll() {
     state.screenshots.forEach((target, index) => {
         if (index === applyStyleSourceIndex) return; // Skip source
 
-        // Deep copy background settings
-        target.background = JSON.parse(JSON.stringify(source.background));
-        // Handle background image separately (not JSON serializable)
-        if (source.background.image) {
-            target.background.image = source.background.image;
-        }
+        // Deep copy background settings (including per-device overrides)
+        target.background = hydrateBackground(JSON.parse(JSON.stringify(source.background)));
+        target.deviceOverrides = hydrateDeviceOverrides(serializeDeviceOverrides(source.deviceOverrides));
 
         // Deep copy screenshot settings
         target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
@@ -5867,19 +6005,18 @@ function replaceScreenshot(index) {
                 // Get the current language
                 const lang = state.currentLanguage;
 
-                // Update the localized image for the current language
-                if (!screenshot.localizedImages) {
-                    screenshot.localizedImages = {};
-                }
-
-                screenshot.localizedImages[lang] = {
+                // Update image for current language and current output device
+                const localizedImages = getLocalizedImagesForDevice(screenshot, state.outputDevice, true);
+                localizedImages[lang] = {
                     image: img,
                     src: event.target.result,
                     name: file.name
                 };
 
-                // Also update legacy image field for compatibility
-                screenshot.image = img;
+                // Keep legacy image field in sync only for fallback iPhone device
+                if (isFallbackDevice(state.outputDevice)) {
+                    screenshot.image = img;
+                }
 
                 // Update displays
                 updateScreenshotList();
@@ -6279,8 +6416,8 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     // Clear canvas explicitly
     targetCtx.clearRect(0, 0, dims.width, dims.height);
 
-    // Draw background for this screenshot
-    const bg = screenshot.background;
+    // Draw background for this screenshot + current output device
+    const bg = getBackgroundForDevice(screenshot, state.outputDevice, false);
     drawBackgroundToContext(targetCtx, dims, bg);
 
     // Draw noise if enabled

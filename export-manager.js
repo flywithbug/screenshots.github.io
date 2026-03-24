@@ -172,6 +172,40 @@
             return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
         }
 
+        function snapshotExportContext() {
+            return {
+                selectedIndex: state.selectedIndex,
+                currentLanguage: state.currentLanguage,
+                outputDevice: state.outputDevice,
+                textLanguages: state.screenshots.map(s => ({
+                    headline: s.text.currentHeadlineLang,
+                    subheadline: s.text.currentSubheadlineLang
+                }))
+            };
+        }
+
+        function applyLanguageToAllScreenshots(lang) {
+            state.currentLanguage = lang;
+            state.screenshots.forEach(s => {
+                s.text.currentHeadlineLang = lang;
+                s.text.currentSubheadlineLang = lang;
+            });
+        }
+
+        function restoreExportContext(snapshot) {
+            state.selectedIndex = snapshot.selectedIndex;
+            state.currentLanguage = snapshot.currentLanguage;
+            state.outputDevice = snapshot.outputDevice;
+            state.screenshots.forEach((s, i) => {
+                const original = snapshot.textLanguages[i];
+                if (!original) return;
+                s.text.currentHeadlineLang = original.headline;
+                s.text.currentSubheadlineLang = original.subheadline;
+            });
+            updateCanvas();
+            if (typeof syncUIWithState === 'function') syncUIWithState();
+        }
+
         async function ensureDirectory(path) {
             await window.__TAURI__.fs.mkdir(path, { recursive: true });
         }
@@ -478,9 +512,7 @@
         }
 
         async function exportAllForLanguage(lang) {
-            const originalIndex = state.selectedIndex;
-            const originalLang = state.currentLanguage;
-            const originalDevice = state.outputDevice;
+            const exportContext = snapshotExportContext();
             const useDirectoryExport = canExportToDirectory();
             const files = [];
             let exportTarget = null;
@@ -504,16 +536,7 @@
                 zip = new JSZipCtor();
             }
 
-            const originalTextLangs = state.screenshots.map(s => ({
-                headline: s.text.currentHeadlineLang,
-                subheadline: s.text.currentSubheadlineLang
-            }));
-
-            state.currentLanguage = lang;
-            state.screenshots.forEach(s => {
-                s.text.currentHeadlineLang = lang;
-                s.text.currentSubheadlineLang = lang;
-            });
+            applyLanguageToAllScreenshots(lang);
 
             for (const device of selectedDevices) {
                 state.outputDevice = device;
@@ -561,15 +584,7 @@
                 }
             });
 
-            state.selectedIndex = originalIndex;
-            state.currentLanguage = originalLang;
-            state.outputDevice = originalDevice;
-            state.screenshots.forEach((s, i) => {
-                s.text.currentHeadlineLang = originalTextLangs[i].headline;
-                s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-            });
-            updateCanvas();
-            if (typeof syncUIWithState === 'function') syncUIWithState();
+            restoreExportContext(exportContext);
 
             if (useDirectoryExport) {
                 await writeExportFilesToDirectory(exportTarget, files, (item, current, totalFiles) => {
@@ -595,9 +610,7 @@
         }
 
         async function exportAllLanguages() {
-            const originalIndex = state.selectedIndex;
-            const originalLang = state.currentLanguage;
-            const originalDevice = state.outputDevice;
+            const exportContext = snapshotExportContext();
             const useDirectoryExport = canExportToDirectory();
             const files = [];
             let exportTarget = null;
@@ -622,11 +635,6 @@
                 zip = new JSZipCtor();
             }
 
-            const originalTextLangs = state.screenshots.map(s => ({
-                headline: s.text.currentHeadlineLang,
-                subheadline: s.text.currentSubheadlineLang
-            }));
-
             for (const device of selectedDevices) {
                 state.outputDevice = device;
                 const { platform } = getExportPlatformAndSize(device);
@@ -635,11 +643,7 @@
                     const lang = state.projectLanguages[langIdx];
                     const langName = languageNames[lang] || lang.toUpperCase();
 
-                    state.currentLanguage = lang;
-                    state.screenshots.forEach(s => {
-                        s.text.currentHeadlineLang = lang;
-                        s.text.currentSubheadlineLang = lang;
-                    });
+                    applyLanguageToAllScreenshots(lang);
 
                     for (let i = 0; i < state.screenshots.length; i++) {
                         state.selectedIndex = i;
@@ -686,15 +690,7 @@
                 }
             });
 
-            state.selectedIndex = originalIndex;
-            state.currentLanguage = originalLang;
-            state.outputDevice = originalDevice;
-            state.screenshots.forEach((s, i) => {
-                s.text.currentHeadlineLang = originalTextLangs[i].headline;
-                s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-            });
-            updateCanvas();
-            if (typeof syncUIWithState === 'function') syncUIWithState();
+            restoreExportContext(exportContext);
 
             if (useDirectoryExport) {
                 await writeExportFilesToDirectory(exportTarget, files, (item, current, totalFiles) => {

@@ -1309,6 +1309,8 @@ input[type="range"]::-webkit-slider-thumb {
     opacity: 0;
     visibility: hidden;
     transition: all 0.2s ease;
+    padding: 16px;
+    overflow-y: auto;
 }
 
 .modal-overlay.visible {
@@ -1326,6 +1328,8 @@ input[type="range"]::-webkit-slider-thumb {
     text-align: center;
     transform: scale(0.9);
     transition: transform 0.2s ease;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
 }
 
 .modal-overlay.visible .modal {
@@ -1418,6 +1422,12 @@ input[type="range"]::-webkit-slider-thumb {
 .translate-modal {
     max-width: 500px;
     text-align: left;
+}
+
+@media (max-height: 820px) {
+    .translate-targets {
+        max-height: 220px;
+    }
 }
 
 .translate-modal .modal-title {

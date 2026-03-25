@@ -997,6 +997,24 @@ function updateSubheadlineLanguageUI() {
 // Translate modal functions
 let currentTranslateTarget = null;
 
+function getAiTranslateMode() {
+    const mode = document.getElementById('ai-translate-mode')?.value;
+    return mode === 'full' ? 'full' : 'incremental';
+}
+
+function updateTranslateModeUI() {
+    const mode = getAiTranslateMode();
+    const sourceSelect = document.getElementById('translate-source-lang');
+    if (!sourceSelect) return;
+
+    if (mode === 'full') {
+        sourceSelect.value = 'en';
+        sourceSelect.disabled = true;
+    } else {
+        sourceSelect.disabled = false;
+    }
+}
+
 function openTranslateModal(target) {
     currentTranslateTarget = target;
     const text = getTextSettings();
@@ -1027,6 +1045,13 @@ function openTranslateModal(target) {
         if (index === 0) option.selected = true;
         sourceSelect.appendChild(option);
     });
+    if (sourceSelect.querySelector('option[value="en"]')) {
+        sourceSelect.value = 'en';
+    }
+
+    const modeSelect = document.getElementById('ai-translate-mode');
+    if (modeSelect && !modeSelect.value) modeSelect.value = 'incremental';
+    updateTranslateModeUI();
 
     // Update source preview
     updateTranslateSourcePreview();
@@ -1091,6 +1116,22 @@ function sanitizeTranslationExportFilename(name) {
         .toLowerCase() || 'translations';
 }
 
+function getCurrentProjectNameForExport() {
+    try {
+        if (Array.isArray(projects) && typeof currentProjectId !== 'undefined') {
+            const current = projects.find((p) => p.id === currentProjectId);
+            if (current?.name) return current.name;
+        }
+    } catch (_) {
+        // Ignore and fallback to DOM label.
+    }
+
+    const triggerName = document.getElementById('project-trigger-name');
+    const domName = triggerName?.textContent?.trim();
+    if (domName) return domName;
+    return 'project';
+}
+
 function toStringTranslationMap(source) {
     if (!source || typeof source !== 'object') return {};
     const mapped = {};
@@ -1149,7 +1190,8 @@ function buildAllTranslationsPayload() {
 
 function exportTranslations() {
     const payload = buildAllTranslationsPayload();
-    const filename = sanitizeTranslationExportFilename('project-translations') + '.json';
+    const projectName = sanitizeTranslationExportFilename(getCurrentProjectNameForExport());
+    const filename = sanitizeTranslationExportFilename(`${projectName}-project-translations`) + '.json';
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -1351,7 +1393,10 @@ function importTranslations() {
 }
 
 function updateTranslateSourcePreview() {
-    const sourceLang = document.getElementById('translate-source-lang').value;
+    const mode = getAiTranslateMode();
+    const sourceLang = mode === 'full'
+        ? 'en'
+        : document.getElementById('translate-source-lang').value;
     let sourceText;
     if (currentTranslateTarget === 'element') {
         const el = getSelectedElement();
@@ -1432,7 +1477,10 @@ function restoreProtectedTokens(text, protectedTokens) {
 }
 
 async function aiTranslateAll() {
-    const sourceLang = document.getElementById('translate-source-lang').value;
+    const mode = getAiTranslateMode();
+    const sourceLang = mode === 'full'
+        ? 'en'
+        : document.getElementById('translate-source-lang').value;
     const isElement = currentTranslateTarget === 'element';
     let texts, languages, sourceText;
     if (isElement) {
@@ -1450,17 +1498,36 @@ async function aiTranslateAll() {
     }
 
     if (!sourceText.trim()) {
-        setTranslateStatus('Please enter text in the source language first', 'error');
+        if (mode === 'full') {
+            setTranslateStatus('Please enter English source text first.', 'error');
+        } else {
+            setTranslateStatus('Please enter text in the source language first', 'error');
+        }
+        return;
+    }
+
+    if (mode === 'full' && !languages.includes('en')) {
+        setTranslateStatus('Full mode requires English in current languages.', 'error');
         return;
     }
 
     const protectedSource = protectTranslatableText(sourceText);
 
-    // Get target languages (all except source)
-    const targetLangs = languages.filter(lang => lang !== sourceLang);
+    // Get target languages
+    const targetLangs = mode === 'full'
+        ? languages.filter(lang => lang !== 'en')
+        : languages.filter((lang) => {
+            if (lang === sourceLang) return false;
+            const existing = texts?.[lang];
+            return !String(existing || '').trim();
+        });
 
     if (targetLangs.length === 0) {
-        setTranslateStatus('Add more languages to translate to', 'error');
+        if (mode === 'full') {
+            setTranslateStatus('No target languages available (English is the only language).', 'error');
+        } else {
+            setTranslateStatus('No empty target languages to translate.', 'error');
+        }
         return;
     }
 
@@ -1484,7 +1551,8 @@ async function aiTranslateAll() {
         <span>Translating...</span>
     `;
 
-    setTranslateStatus(`Translating to ${targetLangs.length} language(s) with ${providerConfig.name}...`, '');
+    const modeLabel = mode === 'full' ? 'full mode' : 'incremental mode';
+    setTranslateStatus(`Translating to ${targetLangs.length} language(s) with ${providerConfig.name} (${modeLabel})...`, '');
 
     // Mark all target items as translating
     targetLangs.forEach(lang => {
@@ -1674,8 +1742,10 @@ function showTranslateConfirmDialog(providerName) {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay visible';
 
-        // Default to first project language
-        const defaultLang = state.projectLanguages[0] || 'en';
+        const defaultLang = state.projectLanguages.includes('en')
+            ? 'en'
+            : (state.projectLanguages[0] || 'en');
+        const defaultMode = 'incremental';
 
         // Build language options
         const languageOptions = state.projectLanguages.map(lang => {
@@ -1685,19 +1755,37 @@ function showTranslateConfirmDialog(providerName) {
             return `<option value="${lang}" ${selected}>${flag} ${name}</option>`;
         }).join('');
 
-        // Count texts for each language
-        const getTextCount = (lang) => {
+        // Count texts for selected source + mode
+        const getTextCount = (lang, mode) => {
             let count = 0;
             state.screenshots.forEach(screenshot => {
                 const text = screenshot.text || state.text;
-                if (text.headlines?.[lang]?.trim()) count++;
-                if (text.subheadlines?.[lang]?.trim()) count++;
+
+                const headlineSource = String(text.headlines?.[lang] || '');
+                if (headlineSource.trim()) {
+                    const targets = mode === 'full'
+                        ? state.projectLanguages.filter(l => l !== 'en')
+                        : state.projectLanguages.filter(l => l !== lang && !String(text.headlines?.[l] || '').trim());
+                    if (targets.length > 0) count++;
+                }
+
+                const subheadlineSource = String(text.subheadlines?.[lang] || '');
+                if (subheadlineSource.trim()) {
+                    const targets = mode === 'full'
+                        ? state.projectLanguages.filter(l => l !== 'en')
+                        : state.projectLanguages.filter(l => l !== lang && !String(text.subheadlines?.[l] || '').trim());
+                    if (targets.length > 0) count++;
+                }
             });
             return count;
         };
 
-        const initialCount = getTextCount(defaultLang);
-        const targetCount = state.projectLanguages.length - 1;
+        const initialCount = getTextCount(defaultLang, defaultMode);
+        const getTargetCount = (mode, lang) => {
+            if (mode === 'full') return state.projectLanguages.filter(l => l !== 'en').length;
+            return state.projectLanguages.filter(l => l !== lang).length;
+        };
+        const initialTargetCount = getTargetCount(defaultMode, defaultLang);
 
         overlay.innerHTML = `
             <div class="modal" style="max-width: 380px;">
@@ -1716,6 +1804,14 @@ function showTranslateConfirmDialog(providerName) {
                     </select>
                 </div>
 
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Translation Mode</label>
+                    <select id="translate-mode-select" style="width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 14px; cursor: pointer;">
+                        <option value="incremental">Incremental (only empty targets)</option>
+                        <option value="full">Full (from English, overwrite existing)</option>
+                    </select>
+                </div>
+
                 <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
                     <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
                         <span style="color: var(--text-secondary);">Texts to translate:</span>
@@ -1723,7 +1819,7 @@ function showTranslateConfirmDialog(providerName) {
                     </div>
                     <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px;">
                         <span style="color: var(--text-secondary);">Target languages:</span>
-                        <span style="color: var(--text-primary); font-weight: 500;">${targetCount}</span>
+                        <span id="translate-target-count" style="color: var(--text-primary); font-weight: 500;">${initialTargetCount}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; font-size: 13px;">
                         <span style="color: var(--text-secondary);">Provider:</span>
@@ -1741,31 +1837,44 @@ function showTranslateConfirmDialog(providerName) {
         document.body.appendChild(overlay);
 
         const select = document.getElementById('translate-source-lang');
+        const modeSelect = document.getElementById('translate-mode-select');
         const countEl = document.getElementById('translate-text-count');
+        const targetCountEl = document.getElementById('translate-target-count');
         const confirmBtn = document.getElementById('translate-confirm');
         const cancelBtn = document.getElementById('translate-cancel');
 
-        // Update count when language changes
-        select.addEventListener('change', () => {
-            const count = getTextCount(select.value);
+        const syncFormState = () => {
+            const mode = modeSelect.value === 'full' ? 'full' : 'incremental';
+            if (mode === 'full') {
+                if (select.querySelector('option[value="en"]')) {
+                    select.value = 'en';
+                }
+                select.disabled = true;
+            } else {
+                select.disabled = false;
+            }
+            const lang = mode === 'full' ? 'en' : select.value;
+            const count = getTextCount(lang, mode);
+            const targetCount = getTargetCount(mode, lang);
             countEl.textContent = count;
+            if (targetCountEl) targetCountEl.textContent = targetCount;
             confirmBtn.disabled = count === 0;
             if (count === 0) {
                 confirmBtn.style.opacity = '0.5';
             } else {
                 confirmBtn.style.opacity = '1';
             }
-        });
+        };
 
-        // Initial state
-        if (initialCount === 0) {
-            confirmBtn.disabled = true;
-            confirmBtn.style.opacity = '0.5';
-        }
+        select.addEventListener('change', syncFormState);
+        modeSelect.addEventListener('change', syncFormState);
+        syncFormState();
 
         confirmBtn.addEventListener('click', () => {
+            const mode = modeSelect.value === 'full' ? 'full' : 'incremental';
+            const sourceLang = mode === 'full' ? 'en' : select.value;
             overlay.remove();
-            resolve(select.value);
+            resolve({ sourceLang, mode });
         });
 
         cancelBtn.addEventListener('click', () => {
@@ -1800,10 +1909,18 @@ async function translateAllText() {
     }
 
     // Show confirmation dialog with source language selector
-    const sourceLang = await showTranslateConfirmDialog(providerConfig.name);
-    if (!sourceLang) return; // User cancelled
+    const translateOptions = await showTranslateConfirmDialog(providerConfig.name);
+    if (!translateOptions) return; // User cancelled
 
-    const targetLangs = state.projectLanguages.filter(lang => lang !== sourceLang);
+    const { sourceLang, mode } = translateOptions;
+    if (mode === 'full' && !state.projectLanguages.includes('en')) {
+        await showAppAlert('Full mode requires English in project languages.', 'error');
+        return;
+    }
+
+    const targetLangs = mode === 'full'
+        ? state.projectLanguages.filter(lang => lang !== 'en')
+        : state.projectLanguages.filter(lang => lang !== sourceLang);
 
     // Collect all texts that need translation
     const textsToTranslate = [];
@@ -1815,32 +1932,48 @@ async function translateAllText() {
         // Headline
         const headline = text.headlines?.[sourceLang] || '';
         if (headline.trim()) {
-            const protectedHeadline = protectTranslatableText(headline);
-            textsToTranslate.push({
-                type: 'headline',
-                screenshotIndex: index,
-                text: headline,
-                promptText: protectedHeadline.protectedText,
-                protectedTokens: protectedHeadline.protectedTokens
-            });
+            const eligibleTargets = mode === 'full'
+                ? targetLangs
+                : targetLangs.filter(lang => !String(text.headlines?.[lang] || '').trim());
+            if (eligibleTargets.length > 0) {
+                const protectedHeadline = protectTranslatableText(headline);
+                textsToTranslate.push({
+                    type: 'headline',
+                    screenshotIndex: index,
+                    text: headline,
+                    promptText: protectedHeadline.protectedText,
+                    protectedTokens: protectedHeadline.protectedTokens,
+                    targetLangs: eligibleTargets
+                });
+            }
         }
 
         // Subheadline
         const subheadline = text.subheadlines?.[sourceLang] || '';
         if (subheadline.trim()) {
-            const protectedSubheadline = protectTranslatableText(subheadline);
-            textsToTranslate.push({
-                type: 'subheadline',
-                screenshotIndex: index,
-                text: subheadline,
-                promptText: protectedSubheadline.protectedText,
-                protectedTokens: protectedSubheadline.protectedTokens
-            });
+            const eligibleTargets = mode === 'full'
+                ? targetLangs
+                : targetLangs.filter(lang => !String(text.subheadlines?.[lang] || '').trim());
+            if (eligibleTargets.length > 0) {
+                const protectedSubheadline = protectTranslatableText(subheadline);
+                textsToTranslate.push({
+                    type: 'subheadline',
+                    screenshotIndex: index,
+                    text: subheadline,
+                    promptText: protectedSubheadline.protectedText,
+                    protectedTokens: protectedSubheadline.protectedTokens,
+                    targetLangs: eligibleTargets
+                });
+            }
         }
     });
 
     if (textsToTranslate.length === 0) {
-        await showAppAlert(`No text found in ${languageNames[sourceLang] || sourceLang}. Add headlines or subheadlines first.`, 'info');
+        if (mode === 'full') {
+            await showAppAlert('No English source text found, or all targets already filtered out.', 'info');
+        } else {
+            await showAppAlert(`No translatable text found in ${languageNames[sourceLang] || sourceLang}.`, 'info');
+        }
         return;
     }
 
@@ -1877,7 +2010,8 @@ async function translateAllText() {
         if (progressDetail) progressDetail.textContent = detail;
     };
 
-    updateStatus('Sending to AI...', `${textsToTranslate.length} texts to ${targetLangs.length} languages using ${providerConfig.name}`);
+    const modeLabel = mode === 'full' ? 'full mode' : 'incremental mode';
+    updateStatus('Sending to AI...', `${textsToTranslate.length} texts to ${targetLangs.length} languages using ${providerConfig.name} (${modeLabel})`);
 
     try {
         // Build a single prompt with all texts
@@ -1984,7 +2118,8 @@ TOKEN RULES (CRITICAL):
             const screenshot = state.screenshots[item.screenshotIndex];
             const text = screenshot.text || state.text;
 
-            targetLangs.forEach(lang => {
+            const applyTargets = item.targetLangs || targetLangs;
+            applyTargets.forEach(lang => {
                 if (itemTranslations[lang]) {
                     const restoredTranslation = restoreProtectedTokens(itemTranslations[lang], item.protectedTokens || []);
                     if (item.type === 'headline') {

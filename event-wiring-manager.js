@@ -347,6 +347,10 @@
             document.getElementById('translate-source-lang').addEventListener('change', (e) => {
                 updateTranslateSourcePreview();
             });
+            document.getElementById('ai-translate-mode').addEventListener('change', () => {
+                updateTranslateModeUI();
+                updateTranslateSourcePreview();
+            });
         
             document.getElementById('translate-modal-cancel').addEventListener('click', () => {
                 document.getElementById('translate-modal').classList.remove('visible');

@@ -351,7 +351,17 @@
             document.getElementById('translate-modal-cancel').addEventListener('click', () => {
                 document.getElementById('translate-modal').classList.remove('visible');
             });
-        
+
+            document.getElementById('export-copy-btn').addEventListener('click', () => {
+                exportTranslations();
+            });
+
+            document.getElementById('import-copy-btn').addEventListener('click', () => {
+                importTranslations();
+            });
+
+            document.getElementById('copy-import-input').addEventListener('change', importTranslationsFromInput);
+
             document.getElementById('translate-modal-apply').addEventListener('click', () => {
                 applyTranslations();
                 document.getElementById('translate-modal').classList.remove('visible');

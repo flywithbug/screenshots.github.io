@@ -1052,6 +1052,304 @@ function openTranslateModal(target) {
     document.getElementById('translate-modal').classList.add('visible');
 }
 
+function getCurrentTranslateContext() {
+    const isElement = currentTranslateTarget === 'element';
+    if (isElement) {
+        const el = getSelectedElement();
+        if (!el || el.type !== 'text') return null;
+        if (!el.texts) el.texts = {};
+        return {
+            target: 'element',
+            isElement: true,
+            texts: el.texts,
+            languages: state.projectLanguages
+        };
+    }
+
+    const text = getTextSettings();
+    const isHeadline = currentTranslateTarget === 'headline';
+    const target = isHeadline ? 'headline' : 'subheadline';
+    const texts = isHeadline ? text.headlines : text.subheadlines;
+    const languages = isHeadline ? text.headlineLanguages : text.subheadlineLanguages;
+
+    if (!texts) return null;
+    return {
+        target,
+        isElement: false,
+        texts,
+        languages
+    };
+}
+
+function sanitizeTranslationExportFilename(name) {
+    return String(name || 'translations')
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .replace(/\s+/g, '-')
+        .replace(/_+/g, '_')
+        .replace(/-+/g, '-')
+        .replace(/^[-_.]+|[-_.]+$/g, '')
+        .toLowerCase() || 'translations';
+}
+
+function toStringTranslationMap(source) {
+    if (!source || typeof source !== 'object') return {};
+    const mapped = {};
+    Object.entries(source).forEach(([langRaw, value]) => {
+        const lang = String(langRaw || '').trim().toLowerCase();
+        if (!lang || typeof value !== 'string') return;
+        mapped[lang] = value;
+    });
+    return mapped;
+}
+
+function ensureProjectLanguageExists(lang) {
+    const normalized = String(lang || '').trim().toLowerCase();
+    if (!normalized) return;
+    if (state.projectLanguages.includes(normalized)) return;
+    addProjectLanguage(normalized);
+}
+
+function ensureScreenshotLanguageLinks(screenshot, lang) {
+    if (!screenshot?.text) return;
+    if (!Array.isArray(screenshot.text.headlineLanguages)) screenshot.text.headlineLanguages = ['en'];
+    if (!Array.isArray(screenshot.text.subheadlineLanguages)) screenshot.text.subheadlineLanguages = ['en'];
+    if (!screenshot.text.headlineLanguages.includes(lang)) screenshot.text.headlineLanguages.push(lang);
+    if (!screenshot.text.subheadlineLanguages.includes(lang)) screenshot.text.subheadlineLanguages.push(lang);
+}
+
+function buildAllTranslationsPayload() {
+    const screenshots = (state.screenshots || []).map((screenshot, index) => {
+        const screenshotText = screenshot.text || {};
+        const textElements = (screenshot.elements || [])
+            .filter((el) => el?.type === 'text')
+            .map((el, textIndex) => ({
+                id: el.id || null,
+                index: textIndex,
+                texts: toStringTranslationMap(el.texts || {})
+            }));
+
+        return {
+            index,
+            name: screenshot.name || `Screenshot ${index + 1}`,
+            headline: toStringTranslationMap(screenshotText.headlines || {}),
+            subheadline: toStringTranslationMap(screenshotText.subheadlines || {}),
+            elements: textElements
+        };
+    });
+
+    return {
+        schema: 'appscreen-translations',
+        version: 2,
+        scope: 'project',
+        exportedAt: new Date().toISOString(),
+        projectLanguages: [...state.projectLanguages],
+        screenshots
+    };
+}
+
+function exportTranslations() {
+    const payload = buildAllTranslationsPayload();
+    const filename = sanitizeTranslationExportFilename('project-translations') + '.json';
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+
+function normalizeImportedTranslationsPayload(parsed) {
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    if (parsed.schema === 'appscreen-translations' && parsed.texts && typeof parsed.texts === 'object') {
+        return parsed.texts;
+    }
+
+    if (parsed.texts && typeof parsed.texts === 'object') {
+        return parsed.texts;
+    }
+
+    return parsed;
+}
+
+function importAllTranslationsFromParsedData(parsed) {
+    if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Invalid translation format.');
+    }
+
+    const screenshotsPayload = Array.isArray(parsed.screenshots) ? parsed.screenshots : [];
+    if (screenshotsPayload.length === 0) {
+        return { success: 0, headline: 0, subheadline: 0, element: 0, importedLangs: [] };
+    }
+
+    const importedLangs = new Set();
+    let headlineCount = 0;
+    let subheadlineCount = 0;
+    let elementCount = 0;
+
+    if (Array.isArray(parsed.projectLanguages)) {
+        parsed.projectLanguages.forEach((lang) => ensureProjectLanguageExists(lang));
+    }
+
+    screenshotsPayload.forEach((screenshotPayload, screenshotIndex) => {
+        const screenshot = state.screenshots[screenshotIndex];
+        if (!screenshot || !screenshotPayload || typeof screenshotPayload !== 'object') return;
+
+        if (!screenshot.text || typeof screenshot.text !== 'object') screenshot.text = {};
+        if (!screenshot.text.headlines || typeof screenshot.text.headlines !== 'object') screenshot.text.headlines = {};
+        if (!screenshot.text.subheadlines || typeof screenshot.text.subheadlines !== 'object') screenshot.text.subheadlines = {};
+        if (!Array.isArray(screenshot.text.headlineLanguages)) screenshot.text.headlineLanguages = ['en'];
+        if (!Array.isArray(screenshot.text.subheadlineLanguages)) screenshot.text.subheadlineLanguages = ['en'];
+
+        const applyMap = (targetMap, incomingMap, counterType) => {
+            Object.entries(toStringTranslationMap(incomingMap)).forEach(([lang, value]) => {
+                ensureProjectLanguageExists(lang);
+                ensureScreenshotLanguageLinks(screenshot, lang);
+                targetMap[lang] = value;
+                importedLangs.add(lang);
+                if (counterType === 'headline') headlineCount++;
+                if (counterType === 'subheadline') subheadlineCount++;
+                if (counterType === 'element') elementCount++;
+            });
+        };
+
+        applyMap(screenshot.text.headlines, screenshotPayload.headline, 'headline');
+        applyMap(screenshot.text.subheadlines, screenshotPayload.subheadline, 'subheadline');
+
+        const textElements = (screenshot.elements || []).filter((el) => el?.type === 'text');
+        (screenshotPayload.elements || []).forEach((elementPayload) => {
+            if (!elementPayload || typeof elementPayload !== 'object') return;
+
+            let targetElement = null;
+            if (elementPayload.id) {
+                targetElement = textElements.find((el) => el.id === elementPayload.id) || null;
+            }
+            if (!targetElement && Number.isInteger(elementPayload.index)) {
+                targetElement = textElements[elementPayload.index] || null;
+            }
+            if (!targetElement) return;
+
+            if (!targetElement.texts || typeof targetElement.texts !== 'object') targetElement.texts = {};
+            applyMap(targetElement.texts, elementPayload.texts, 'element');
+            targetElement.text = getElementText(targetElement);
+        });
+
+        if (Object.keys(toStringTranslationMap(screenshotPayload.subheadline)).length > 0) {
+            screenshot.text.subheadlineEnabled = true;
+        }
+    });
+
+    return {
+        success: headlineCount + subheadlineCount + elementCount,
+        headline: headlineCount,
+        subheadline: subheadlineCount,
+        element: elementCount,
+        importedLangs: Array.from(importedLangs)
+    };
+}
+
+function importTranslationsFromParsedData(parsed) {
+    const isProjectPayload = parsed?.scope === 'project' || Array.isArray(parsed?.screenshots);
+    if (isProjectPayload) {
+        const result = importAllTranslationsFromParsedData(parsed);
+        syncUIWithState();
+        updateCanvas();
+        saveState();
+        if (currentTranslateTarget) {
+            openTranslateModal(currentTranslateTarget);
+        }
+        return result;
+    }
+
+    const context = getCurrentTranslateContext();
+    if (!context) return { success: 0, importedLangs: [] };
+
+    const importedMap = normalizeImportedTranslationsPayload(parsed);
+    if (!importedMap || typeof importedMap !== 'object') {
+        throw new Error('Invalid translation format.');
+    }
+
+    const importedLangs = [];
+    let success = 0;
+
+    Object.entries(importedMap).forEach(([langRaw, value]) => {
+        const lang = String(langRaw || '').trim().toLowerCase();
+        if (!lang) return;
+        if (typeof value !== 'string') return;
+
+        if (!state.projectLanguages.includes(lang) && languageNames[lang]) {
+            addProjectLanguage(lang);
+        }
+
+        if (!context.languages.includes(lang)) {
+            return;
+        }
+
+        context.texts[lang] = value;
+        importedLangs.push(lang);
+        success++;
+    });
+
+    if (context.isElement) {
+        const el = getSelectedElement();
+        if (el) {
+            el.text = getElementText(el);
+            document.getElementById('element-text-input').value = getElementText(el);
+        }
+    } else {
+        const text = getTextSettings();
+        if (context.target === 'headline') {
+            document.getElementById('headline-text').value = context.texts[text.currentHeadlineLang] || '';
+        } else {
+            document.getElementById('subheadline-text').value = context.texts[text.currentSubheadlineLang] || '';
+            text.subheadlineEnabled = true;
+            syncUIWithState();
+        }
+    }
+
+    updateCanvas();
+    saveState();
+    openTranslateModal(currentTranslateTarget);
+    return { success, importedLangs };
+}
+
+async function importTranslationsFromInput(event) {
+    const file = event?.target?.files?.[0];
+    if (event?.target) {
+        event.target.value = '';
+    }
+    if (!file) return;
+
+    try {
+        const content = await file.text();
+        const parsed = JSON.parse(content);
+        const result = importTranslationsFromParsedData(parsed);
+        if (!result.success) {
+            await showAppAlert('No matching language copy was imported.', 'info');
+            return;
+        }
+        if (result.headline !== undefined) {
+            await showAppAlert(
+                `Imported ${result.success} entries (headline ${result.headline}, subheadline ${result.subheadline}, element ${result.element}).`,
+                'success'
+            );
+            return;
+        }
+        await showAppAlert(`Imported ${result.success} copy entr${result.success === 1 ? 'y' : 'ies'}.`, 'success');
+    } catch (error) {
+        console.error('Failed to import translations:', error);
+        await showAppAlert('Failed to import copy file. Please use a valid JSON file.', 'error');
+    }
+}
+
+function importTranslations() {
+    const input = document.getElementById('copy-import-input');
+    if (!input) return;
+    input.click();
+}
+
 function updateTranslateSourcePreview() {
     const sourceLang = document.getElementById('translate-source-lang').value;
     let sourceText;
